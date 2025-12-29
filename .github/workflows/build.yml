@@ -21,9 +21,11 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
+
       # 🔹 安装依赖
       - name: 安装依赖
         run: |
+          sudo rm -rf /var/lib/apt/lists/partial/*
           sudo apt-get update
           sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
 
