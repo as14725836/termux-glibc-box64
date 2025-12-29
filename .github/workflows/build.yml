@@ -20,12 +20,20 @@ jobs:
       # 🔹 检出当前仓库（存储 last commit 文件）
       - name: 检出仓库
         uses: actions/checkout@v4
+        
+      - name: 修复依赖
+        run: |
+          sudo apt clean
+          sudo apt autoclean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt update
+          sudo rm /var/lib/apt/lists/lock
+          sudo rm /var/cache/apt/archives/lock
 
 
       # 🔹 安装依赖
       - name: 安装依赖
         run: |
-          sudo rm -rf /var/lib/apt/lists/partial/*
           sudo apt-get update
           sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
 
