@@ -104,7 +104,9 @@ jobs:
             -DWINLATOR_GLIBC=ON \
             -DARM64=ON \
             -DBAD_SIGN=ON \
-            -DSD8G2=ON
+            -DSD8G2=ON \
+            -Db_lto=true \
+            -Dstrip=true
           make -j$(nproc)
           echo "✅ 构建完成"
           # 修复动态链接器路径（Termux glibc）
