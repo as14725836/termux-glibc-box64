@@ -3,24 +3,24 @@ name: 开发版 Box64 (aarch64)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'  # 每5分钟检测一次上游是否有更新（相当于源码更新即刻构建）
+    - cron: '*/5 * * * *'  # 每5分钟运行一次
 
 permissions:
   contents: write  # 允许 GITHUB_TOKEN 创建 Release
 
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
-  LAST_COMMIT_FILE: last_box64_commit.txt
 
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
 
     steps:
-      # 🔹 检出当前仓库（存储 last commit 文件）
+      # 🔹 检出当前仓库
       - name: 检出仓库
         uses: actions/checkout@v4
         
+      # 🔹 修复依赖
       - name: 修复依赖
         run: |
           sudo apt clean
@@ -29,18 +29,41 @@ jobs:
           sudo apt update
           sudo rm /var/lib/apt/lists/lock
           sudo rm /var/cache/apt/archives/lock
+      
       # 🔹 安装依赖
       - name: 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
         
+      # 🔹 获取 Box64 信息
+      - name: 获取 Box64 信息
+        id: get_info
+        run: |
+          # 获取最新 commit
+          LATEST_COMMIT=$(git ls-remote ${{ env.SRC_REPO }} HEAD | cut -f1 | head -c 8)
+          
+          # 获取当前日期作为版本号
+          CURRENT_DATE=$(date +%Y%m%d%H%M)
+          VERSION="dev-${CURRENT_DATE}-${LATEST_COMMIT}"
+          
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "LATEST_COMMIT=$LATEST_COMMIT" >> $GITHUB_ENV
+          echo "构建版本: $VERSION"
+          
       # 🔹 克隆 Box64 并构建
       - name: 克隆 Box64 并构建
         run: |
-          git clone https://github.com/ptitSeb/box64.git
+          # 清理旧目录
+          rm -rf box64 box64-build
+          
+          # 克隆最新源码
+          git clone --depth=1 https://github.com/ptitSeb/box64.git
+          
           cd box64
           mkdir build && cd build
+          
+          # CMake 配置
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
@@ -48,45 +71,63 @@ jobs:
             -DARM64=ON \
             -DBAD_SIGN=ON \
             -DSD8G2=ON
+          
+          # 编译
           make -j$(nproc)
           echo "✅ 构建完成"
+          
           # 修复动态链接器路径（Termux glibc）
           patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 box64 || true
+          
           # 打包
-          TAR_FILE="termux-glibc-box64-${LATEST_TAG}.tar.gz"
+          TAR_FILE="termux-glibc-box64-${{ env.VERSION }}.tar.gz"
           tar -czvf ../../$TAR_FILE box64
-          echo "$LATEST_COMMIT" > ../../${{ env.LAST_COMMIT_FILE}}
+          
+          # 移动文件到工作目录
+          mv ../../$TAR_FILE ../
           echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
-          echo "VERSION=$LATEST_TAG" >> $GITHUB_ENV
+          
+          echo "📦 打包完成: $TAR_FILE"
+      
       # 🔹 上传构建产物
       - name: 上传构建产物
-        if: steps.check_build.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: termux-glibc-box64-${{ env.VERSION }}
-          path: ${{ env.TAR_FILE }}
-
-      # 🔹 保存 last commit 文件（不推送仓库，只保留 artifact）
-      - name: 保存 last commit 文件
-        if: steps.check_build.outputs.skip_build == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: last-box64-commit
-          path: ${{ env.LAST_COMMIT_FILE }}
+          name: box64-${{ env.VERSION }}
+          path: box64/${{ env.TAR_FILE }}
+          retention-days: 7  # 保留7天
 
       # 🔹 发布 Release
       - name: 发布到 GitHub Release
-        if: steps.check_build.outputs.skip_build == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: box64-${{ env.VERSION }}
           name: Box64 ${{ env.VERSION }} (aarch64, Termux glibc)
           body: |
-            ✅ **Box64 自动构建成功！**
-            - 标签: `${{ env.VERSION }}`
-            - 提交哈希: `${{ env.LATEST_COMMIT }}`
-            - 作者: `${{ env.commit_author }}`
-            - 提交时间: `${{ env.commit_date }}`
-          files: ${{ env.TAR_FILE }}
+            🚀 **Box64 自动构建 - 开发版**
+            
+            ### 📅 构建信息
+            - **版本**: `${{ env.VERSION }}`
+            - **Commit**: `${{ env.LATEST_COMMIT }}`
+            - **构建时间**: `$(date -u +"%Y-%m-%d %H:%M:%S UTC")`
+            - **平台**: `aarch64`
+            - **环境**: `Termux glibc`
+            
+            ### ⚙️ 编译选项
+            - `ARM_DYNAREC=ON`
+            - `WINLATOR_GLIBC=ON`
+            - `ARM64=ON`
+            - `BAD_SIGN=ON`
+            - `SD8G2=ON`
+            
+            ### 📦 使用说明
+            1. 解压文件
+            2. 将 `box64` 可执行文件复制到 Termux 的 glibc 环境中
+            3. 确保动态链接器路径正确
+            
+            > ⚠️ **注意**: 这是自动构建的开发版，可能不稳定
+          files: box64/${{ env.TAR_FILE }}
+          draft: false
+          prerelease: true  # 标记为预发布版本
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
