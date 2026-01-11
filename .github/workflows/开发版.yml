@@ -1,0 +1,92 @@
+name: 开发版 Box64 (aarch64)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'  # 每5分钟检测一次上游是否有更新（相当于源码更新即刻构建）
+
+permissions:
+  contents: write  # 允许 GITHUB_TOKEN 创建 Release
+
+env:
+  SRC_REPO: https://github.com/ptitSeb/box64
+  LAST_COMMIT_FILE: last_box64_commit.txt
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      # 🔹 检出当前仓库（存储 last commit 文件）
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        
+      - name: 修复依赖
+        run: |
+          sudo apt clean
+          sudo apt autoclean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt update
+          sudo rm /var/lib/apt/lists/lock
+          sudo rm /var/cache/apt/archives/lock
+      # 🔹 安装依赖
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
+        
+      # 🔹 克隆 Box64 并构建
+      - name: 克隆 Box64 并构建
+        run: |
+          git clone https://github.com/ptitSeb/box64.git
+          cd box64
+          mkdir build && cd build
+          cmake .. \
+            -DARM_DYNAREC=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWINLATOR_GLIBC=ON \
+            -DARM64=ON \
+            -DBAD_SIGN=ON \
+            -DSD8G2=ON
+          make -j$(nproc)
+          echo "✅ 构建完成"
+          # 修复动态链接器路径（Termux glibc）
+          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 box64 || true
+          # 打包
+          TAR_FILE="termux-glibc-box64-${LATEST_TAG}.tar.gz"
+          tar -czvf ../../$TAR_FILE box64
+          echo "$LATEST_COMMIT" > ../../${{ env.LAST_COMMIT_FILE}}
+          echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
+          echo "VERSION=$LATEST_TAG" >> $GITHUB_ENV
+      # 🔹 上传构建产物
+      - name: 上传构建产物
+        if: steps.check_build.outputs.skip_build == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-glibc-box64-${{ env.VERSION }}
+          path: ${{ env.TAR_FILE }}
+
+      # 🔹 保存 last commit 文件（不推送仓库，只保留 artifact）
+      - name: 保存 last commit 文件
+        if: steps.check_build.outputs.skip_build == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-box64-commit
+          path: ${{ env.LAST_COMMIT_FILE }}
+
+      # 🔹 发布 Release
+      - name: 发布到 GitHub Release
+        if: steps.check_build.outputs.skip_build == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: box64-${{ env.VERSION }}
+          name: Box64 ${{ env.VERSION }} (aarch64, Termux glibc)
+          body: |
+            ✅ **Box64 自动构建成功！**
+            - 标签: `${{ env.VERSION }}`
+            - 提交哈希: `${{ env.LATEST_COMMIT }}`
+            - 作者: `${{ env.commit_author }}`
+            - 提交时间: `${{ env.commit_date }}`
+          files: ${{ env.TAR_FILE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
