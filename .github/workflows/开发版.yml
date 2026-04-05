@@ -58,9 +58,7 @@ jobs:
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DWINLATOR_GLIBC=ON \
             -DARM64=ON \
-            -DBAD_SIGN=ON \
             -DSD845=ON \
             -DSD865=ON \
             -DSD888=ON \
