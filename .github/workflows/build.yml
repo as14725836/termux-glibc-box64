@@ -30,7 +30,6 @@ jobs:
           sudo rm /var/lib/apt/lists/lock
           sudo rm /var/cache/apt/archives/lock
 
-
       # 🔹 安装依赖
       - name: 安装依赖
         run: |
@@ -95,8 +94,18 @@ jobs:
       - name: 克隆 Box64 并构建
         if: steps.check_build.outputs.skip_build == 'false'
         run: |
+          # 设置 Termux glibc 环境变量
+          unset LD_PRELOAD
+          export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
+          export PATH=$GLIBC_PREFIX/bin:$PATH
+          
           git clone --depth=1 $SRC_REPO
           cd box64
+          
+          # 修改 CMakeLists.txt 中的系统路径为 Termux glibc 路径
+          sed -i 's/\/usr/\/data\/data\/com.termux\/files\/usr\/glibc/g' CMakeLists.txt
+          sed -i 's/\/etc/\/data\/data\/com.termux\/files\/usr\/glibc\/etc/g' CMakeLists.txt
+          
           mkdir build && cd build
           cmake .. \
             -DARM_DYNAREC=ON \
@@ -105,8 +114,7 @@ jobs:
             -DSD8G2=ON
           make -j$(nproc)
           echo "✅ 构建完成"
-          # 修复动态链接器路径（Termux glibc）
-          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 box64 || true
+          
           # 打包
           TAR_FILE="termux-glibc-box64-${LATEST_TAG}.tar.gz"
           tar -czvf ../../$TAR_FILE box64
