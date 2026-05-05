@@ -2,109 +2,250 @@ name: Build Box64 (aarch64)
 
 on:
   workflow_dispatch:
+    inputs:
+      selected_tag:
+        description: '选择要构建的标签版本（留空自动使用最新标签）'
+        required: false
+        default: ''
+        type: string
+      build_latest:
+        description: '强制构建最新版本（忽略缓存）'
+        required: false
+        default: false
+        type: boolean
   schedule:
-    - cron: '*/5 * * * *'  # 每5分钟检测一次上游是否有更新（相当于源码更新即刻构建）
+    - cron: '*/5 * * * *'  # 每5分钟检测一次上游是否有更新
 
 permissions:
   contents: write  # 允许 GITHUB_TOKEN 创建 Release
+  pull-requests: read
 
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
   LAST_COMMIT_FILE: last_box64_commit.txt
+  TAGS_CACHE_FILE: available_tags.json
 
 jobs:
-  build:
+  fetch-tags:
     runs-on: ubuntu-24.04-arm
-
+    outputs:
+      latest_tag: ${{ steps.get_tags.outputs.latest_tag }}
+      latest_commit: ${{ steps.get_tags.outputs.latest_commit }}
+      available_tags: ${{ steps.get_tags.outputs.available_tags }}
+      selected_tag: ${{ steps.select_tag.outputs.selected_tag }}
+      selected_commit: ${{ steps.select_tag.outputs.selected_commit }}
+      skip_build: ${{ steps.check_build.outputs.skip_build }}
+      build_reason: ${{ steps.check_build.outputs.build_reason }}
+    
     steps:
-      # 🔹 检出当前仓库（存储 last commit 文件）
+      # 🔹 检出当前仓库
       - name: 检出仓库
         uses: actions/checkout@v4
-        
+      
+      # 🔹 修复依赖问题
       - name: 修复依赖
         run: |
-          sudo apt clean
-          sudo apt autoclean
           sudo rm -rf /var/lib/apt/lists/*
           sudo apt update
-          sudo rm /var/lib/apt/lists/lock
-          sudo rm /var/cache/apt/archives/lock
-
+      
       # 🔹 安装依赖
       - name: 安装依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
-
-      # 🔹 获取 Box64 最新提交与标签
-      - name: 获取 Box64 最新提交与标签
-        id: get_latest
+          sudo apt-get install -y curl jq git
+      
+      # 🔹 获取所有可用标签和最新提交
+      - name: 获取所有标签和提交信息
+        id: get_tags
         run: |
           set -e
           echo "📡 检查上游仓库: $SRC_REPO"
-          LATEST_COMMIT=$(git ls-remote $SRC_REPO HEAD | awk '{print $1}')
-          LATEST_TAG=$(git ls-remote --tags $SRC_REPO | awk '{print $2}' | sed 's|refs/tags/||' | sort -V | tail -n1)
-          if [ -z "$LATEST_TAG" ]; then
-            echo "❌ 未获取到标签，使用 commit 缩写作为版本"
-            LATEST_TAG=${LATEST_COMMIT:0:7}
+          
+          # 获取所有标签（按版本号排序）
+          echo "📋 获取所有标签..."
+          ALL_TAGS=$(git ls-remote --tags $SRC_REPO | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '^{}' | sort -V || true)
+          
+          if [ -z "$ALL_TAGS" ]; then
+            echo "⚠️ 未找到任何标签，将使用最新提交"
+            LATEST_COMMIT=$(git ls-remote $SRC_REPO HEAD | awk '{print $1}')
+            LATEST_TAG="${LATEST_COMMIT:0:7}"
+            AVAILABLE_TAGS_JSON='{"no-tags":true,"latest-commit":"'"$LATEST_COMMIT"'"}'
+          else
+            LATEST_TAG=$(echo "$ALL_TAGS" | tail -n1)
+            LATEST_COMMIT=$(git ls-remote $SRC_REPO "refs/tags/$LATEST_TAG" | awk '{print $1}')
+            
+            # 生成标签列表 JSON
+            AVAILABLE_TAGS_JSON=$(echo "$ALL_TAGS" | jq -R -s -c 'split("\n")[:-1]')
           fi
+          
           echo "✅ 最新标签: $LATEST_TAG"
           echo "✅ 最新提交: $LATEST_COMMIT"
-          echo "LATEST_COMMIT=$LATEST_COMMIT" >> $GITHUB_ENV
-          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
-          curl -s "https://api.github.com/repos/ptitSeb/box64/commits/$LATEST_COMMIT" -o commit.json
-          COMMIT_DATE=$(jq -r '.commit.author.date' commit.json)
-          COMMIT_AUTHOR=$(jq -r '.commit.author.name' commit.json)
-          echo "commit_date=$COMMIT_DATE" >> $GITHUB_ENV
-          echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_ENV
-
-      # 🔹 获取上次构建提交
-      - name: 获取上次构建提交
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "latest_commit=$LATEST_COMMIT" >> $GITHUB_OUTPUT
+          echo "available_tags=$AVAILABLE_TAGS_JSON" >> $GITHUB_OUTPUT
+          
+          # 保存到文件供后续使用
+          echo "$AVAILABLE_TAGS_JSON" > ${{ env.TAGS_CACHE_FILE }}
+          echo "$LATEST_TAG" > latest_tag.txt
+          echo "$LATEST_COMMIT" > latest_commit.txt
+      
+      # 🔹 选择要构建的标签
+      - name: 选择标签版本
+        id: select_tag
+        run: |
+          BUILD_TAG="${{ github.event.inputs.selected_tag }}"
+          BUILD_LATEST="${{ github.event.inputs.build_latest }}"
+          
+          # 如果没有指定标签，使用最新标签
+          if [ -z "$BUILD_TAG" ] || [ "$BUILD_TAG" = "" ]; then
+            BUILD_TAG="${{ steps.get_tags.outputs.latest_tag }}"
+            echo "🔖 未指定标签，使用最新标签: $BUILD_TAG"
+            TAG_MODE="latest"
+          else
+            echo "🔖 用户指定标签: $BUILD_TAG"
+            TAG_MODE="selected"
+            
+            # 验证标签是否存在
+            if ! echo '${{ steps.get_tags.outputs.available_tags }}' | jq -e ".[] | select(. == \"$BUILD_TAG\")" > /dev/null; then
+              echo "⚠️ 警告: 标签 '$BUILD_TAG' 不存在，将使用最新标签"
+              BUILD_TAG="${{ steps.get_tags.outputs.latest_tag }}"
+              TAG_MODE="latest-fallback"
+            fi
+          fi
+          
+          # 获取指定标签的提交哈希
+          if [ "$TAG_MODE" = "latest" ] || [ "$TAG_MODE" = "latest-fallback" ]; then
+            BUILD_COMMIT="${{ steps.get_tags.outputs.latest_commit }}"
+          else
+            BUILD_COMMIT=$(git ls-remote $SRC_REPO "refs/tags/$BUILD_TAG" | awk '{print $1}')
+          fi
+          
+          echo "selected_tag=$BUILD_TAG" >> $GITHUB_OUTPUT
+          echo "selected_commit=$BUILD_COMMIT" >> $GITHUB_OUTPUT
+          echo "tag_mode=$TAG_MODE" >> $GITHUB_ENV
+          echo "✅ 将构建标签: $BUILD_TAG"
+          echo "✅ 对应提交: $BUILD_COMMIT"
+      
+      # 🔹 获取上一次构建的标签
+      - name: 获取上次构建信息
         id: get_last
         run: |
           if [ -f "${{ env.LAST_COMMIT_FILE }}" ]; then
-            LAST_COMMIT=$(cat "${{ env.LAST_COMMIT_FILE }}")
-            echo "上次构建提交: $LAST_COMMIT"
+            LAST_BUILD=$(cat "${{ env.LAST_COMMIT_FILE }}")
+            echo "👉 上次构建: $LAST_BUILD"
+            echo "last_build=$LAST_BUILD" >> $GITHUB_OUTPUT
           else
-            LAST_COMMIT="none"
-            echo "未找到上次构建记录"
+            echo "👉 首次构建，无历史记录"
+            echo "last_build=none" >> $GITHUB_OUTPUT
           fi
-          echo "LAST_COMMIT=$LAST_COMMIT" >> $GITHUB_ENV
-
+      
       # 🔹 判断是否需要构建
       - name: 检查是否需要构建
         id: check_build
         run: |
-          if [ "$LATEST_COMMIT" = "$LAST_COMMIT" ]; then
-            echo "✅ 无新提交，跳过构建"
-            echo "skip_build=true" >> $GITHUB_OUTPUT
+          SELECTED_COMMIT="${{ steps.select_tag.outputs.selected_commit }}"
+          LAST_BUILD="${{ steps.get_last.outputs.last_build }}"
+          FORCE_BUILD="${{ github.event.inputs.build_latest }}"
+          IS_MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
+          
+          # 构建理由记录
+          REASON=""
+          SKIP="false"
+          
+          if [ "$FORCE_BUILD" = "true" ]; then
+            REASON="强制构建（用户指定）"
+            SKIP="false"
+            echo "🔄 强制构建模式已启用"
+          elif [ "$SELECTED_COMMIT" = "$LAST_BUILD" ]; then
+            REASON="无新提交（提交哈希相同）"
+            SKIP="true"
+            echo "✅ 提交哈希未变化，跳过构建"
           else
-            echo "🟢 发现新提交或标签变化，准备构建..."
-            echo "skip_build=false" >> $GITHUB_OUTPUT
+            REASON="检测到新提交"
+            SKIP="false"
+            echo "🟢 提交哈希变化，准备构建"
           fi
-
-      # 🔹 跳过无更新构建
-      - name: 跳过无更新构建
-        if: steps.check_build.outputs.skip_build == 'true'
+          
+          echo "skip_build=$SKIP" >> $GITHUB_OUTPUT
+          echo "build_reason=$REASON" >> $GITHUB_OUTPUT
+          
+          # 显示构建信息摘要
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 构建决策摘要:"
+          echo "   触发方式: ${{ github.event_name }}"
+          echo "   选择标签: ${{ steps.select_tag.outputs.selected_tag }}"
+          echo "   提交哈希: ${SELECTED_COMMIT:0:8}"
+          echo "   上次构建: ${LAST_BUILD:0:8}"
+          echo "   是否跳过: $SKIP"
+          echo "   构建理由: $REASON"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # 🔹 构建任务
+  build:
+    needs: fetch-tags
+    if: needs.fetch-tags.outputs.skip_build == 'false'
+    runs-on: ubuntu-24.04-arm
+    
+    steps:
+      # 🔹 检出当前仓库
+      - name: 检出仓库
+        uses: actions/checkout@v4
+      
+      # 🔹 修复依赖
+      - name: 修复依赖
         run: |
-          echo "✅ 无新提交，跳过构建"
-          exit 0
-
-      # 🔹 克隆 Box64 并构建
-      - name: 克隆 Box64 并构建
-        if: steps.check_build.outputs.skip_build == 'false'
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt update
+      
+      # 🔹 安装依赖
+      - name: 安装依赖
         run: |
-          # 设置 Termux glibc 环境变量
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
+      
+      # 🔹 克隆并签出指定标签
+      - name: 克隆 Box64（指定标签）
+        run: |
+          SELECTED_TAG="${{ needs.fetch-tags.outputs.selected_tag }}"
+          
+          # 克隆完整仓库以获取标签
+          git clone ${{ env.SRC_REPO }}
+          cd box64
+          
+          # 切换到指定标签
+          if git rev-parse "refs/tags/$SELECTED_TAG" >/dev/null 2>&1; then
+            git checkout "tags/$SELECTED_TAG" -b "build-$SELECTED_TAG"
+            echo "✅ 已切换到标签: $SELECTED_TAG"
+          else
+            echo "⚠️ 标签不存在，使用最新提交"
+            git checkout HEAD
+          fi
+          
+          # 获取提交信息
+          COMMIT_HASH=$(git rev-parse HEAD)
+          COMMIT_DATE=$(git log -1 --format=%cd --date=iso)
+          COMMIT_AUTHOR=$(git log -1 --format=%an)
+          
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "COMMIT_DATE=$COMMIT_DATE" >> $GITHUB_ENV
+          echo "COMMIT_AUTHOR=$COMMIT_AUTHOR" >> $GITHUB_ENV
+          
+          echo "📝 构建信息:"
+          echo "   标签: $SELECTED_TAG"
+          echo "   提交: ${COMMIT_HASH:0:8}"
+          echo "   作者: $COMMIT_AUTHOR"
+          echo "   时间: $COMMIT_DATE"
+      
+      # 🔹 构建 Box64
+      - name: 构建 Box64
+        run: |
+          cd box64
+
           unset LD_PRELOAD
           export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
           export PATH=$GLIBC_PREFIX/bin:$PATH
           
-          git clone --depth=1 $SRC_REPO
-          cd box64
-          
-          # 修改 CMakeLists.txt 中的系统路径为 Termux glibc 路径
-          sed -i 's/\/usr/\/data\/data\/com.termux\/files\/usr\/glibc/g' CMakeLists.txt
-          sed -i 's/\/etc/\/data\/data\/com.termux\/files\/usr\/glibc\/etc/g' CMakeLists.txt
+          # 修改 CMakeLists.txt 适配 Termux glibc
+          sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
+          sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
           
           mkdir build && cd build
           cmake .. \
@@ -113,44 +254,95 @@ jobs:
             -DARM64=ON \
             -DSD8G2=ON
           make -j$(nproc)
-          echo "✅ 构建完成"
           
-          # 打包
-          TAR_FILE="termux-glibc-box64-${LATEST_TAG}.tar.gz"
-          tar -czvf ../../$TAR_FILE box64
-          echo "$LATEST_COMMIT" > ../../${{ env.LAST_COMMIT_FILE}}
+          echo "✅ 构建完成"
+      
+      # 🔹 打包产物
+      - name: 打包产物
+        run: |
+          VERSION="${{ needs.fetch-tags.outputs.selected_tag }}"
+          TAR_FILE="termux-glibc-box64-${VERSION}.tar.gz"
+          
+          cd box64/build
+          tar -czvf "../../$TAR_FILE" box64
+          
           echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
-          echo "VERSION=$LATEST_TAG" >> $GITHUB_ENV
-
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+          # 保存构建记录
+          echo "${{ env.COMMIT_HASH }}" > "../../${{ env.LAST_COMMIT_FILE }}"
+      
       # 🔹 上传构建产物
       - name: 上传构建产物
-        if: steps.check_build.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: termux-glibc-box64-${{ env.VERSION }}
           path: ${{ env.TAR_FILE }}
-
-      # 🔹 保存 last commit 文件（不推送仓库，只保留 artifact）
-      - name: 保存 last commit 文件
-        if: steps.check_build.outputs.skip_build == 'false'
+      
+      # 🔹 保存 commit 记录
+      - name: 保存构建记录
         uses: actions/upload-artifact@v4
         with:
-          name: last-box64-commit
+          name: last-box64-build-record
           path: ${{ env.LAST_COMMIT_FILE }}
-
-      # 🔹 发布 Release
+      
+      # 🔹 发布到 GitHub Release
       - name: 发布到 GitHub Release
-        if: steps.check_build.outputs.skip_build == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: box64-${{ env.VERSION }}
           name: Box64 ${{ env.VERSION }} (aarch64, Termux glibc)
           body: |
             ✅ **Box64 自动构建成功！**
-            - 标签: `${{ env.VERSION }}`
-            - 提交哈希: `${{ env.LATEST_COMMIT }}`
-            - 作者: `${{ env.commit_author }}`
-            - 提交时间: `${{ env.commit_date }}`
+            
+            ### 📦 构建信息
+            - 版本标签: `${{ env.VERSION }}`
+            - 提交哈希: `${{ env.COMMIT_HASH }}`
+            - 作者: `${{ env.COMMIT_AUTHOR }}`
+            - 提交时间: `${{ env.COMMIT_DATE }}`
+            - 构建时间: `$(date -u '+%Y-%m-%d %H:%M:%S UTC')`
+            
+            ### 🎯 目标平台
+            - 架构: aarch64 (ARM64)
+            - 环境: Termux glibc
+            - 优化: ARM_DYNAREC + SD8G2
+            
+            ### 📥 使用方法
+            ```bash
+            # 解压到 Termux glibc 目录
+            tar -xzf termux-glibc-box64-${VERSION}.tar.gz -C /data/data/com.termux/files/usr/glibc/
+            ```
           files: ${{ env.TAR_FILE }}
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  # 🔹 显示标签列表（手动触发时）
+  show-tags:
+    needs: fetch-tags
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: 显示可用标签
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 可用的 Box64 标签版本列表:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          TAGS_JSON='${{ needs.fetch-tags.outputs.available_tags }}'
+          
+          if echo "$TAGS_JSON" | jq -e '. | length' > /dev/null 2>&1; then
+            echo "$TAGS_JSON" | jq -r '.[]' | while read tag; do
+              # 获取每个标签的最后提交日期
+              COMMIT_DATE=$(git ls-remote --tags --refs ${{ env.SRC_REPO }} "refs/tags/$tag" | awk '{print $1}' | xargs -I {} curl -s "https://api.github.com/repos/ptitSeb/box64/commits/{}" | jq -r '.commit.author.date // "未知"' | head -1)
+              echo "   🏷️  $tag (提交日期: ${COMMIT_DATE:-未知})"
+            done
+          else
+            echo "   ⚠️ 未找到任何标签，将使用最新提交构建"
+          fi
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "💡 提示: 如需构建特定版本，请在手动触发时输入标签名称"
+          echo "   示例: v0.8.0, v0.7.8"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
