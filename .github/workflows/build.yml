@@ -280,6 +280,8 @@ jobs:
           make -j$(nproc)
           
           echo "✅ 构建完成"
+
+          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 ./box64
           
           # 检查生成的二进制文件
           if [ -f "box64" ]; then
