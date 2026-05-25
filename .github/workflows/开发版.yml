@@ -105,10 +105,16 @@ jobs:
           # 清理旧目录
           rm -rf box64
           
-          # 克隆最新源码
-          git clone --depth=1 ${{ env.SRC_REPO }} box64
+          # 克隆最新源码（完整克隆，因为需要 revert）
+          git clone ${{ env.SRC_REPO }} box64
           
           cd box64
+          
+          # 撤销指定的补丁
+          git revert 58d3525cb --no-edit
+          
+          # 推送撤销后的更改
+          git push
           
           # 设置 Termux glibc 环境变量
           unset LD_PRELOAD
@@ -121,21 +127,13 @@ jobs:
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
           
           mkdir build && cd build
-          export CC=clang
-          export CXX=clang++
-          export CFLAGS="-O3 -mcpu=cortex-x3 -mtune=cortex-x3 -Wno-error"
-          export CXXFLAGS="$CFLAGS"
           
           # CMake 配置
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DARM64=ON \
-            -DSD845=ON \
-            -DSD865=ON \
-            -DSD888=ON \
-            -DSD8G2=ON \
-            -DSD8EG5=ON
+            -DSD8G2=ON 
           
           # 编译
           make -j$(nproc)
