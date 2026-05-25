@@ -109,12 +109,7 @@ jobs:
           git clone ${{ env.SRC_REPO }} box64
           
           cd box64
-          
-          # 撤销指定的补丁
-          git revert 58d3525cb --no-edit
-          
-          # 推送撤销后的更改
-          git push
+      
           
           # 设置 Termux glibc 环境变量
           unset LD_PRELOAD
@@ -125,6 +120,12 @@ jobs:
           # 修改 CMakeLists.txt 适配 Termux glibc
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+
+          # 修复兼容
+          sed -i '/if(emu->flags.quitonlongjmp)/,/emu->flags.need_jmpbuf = 1;/c\    emu->flags.need_jmpbuf = 1;' src/dynarec/dynarec.c
+          sed -i '/if(emu->flags.quitonlongjmp)/,/emu->flags.need_jmpbuf = 1;/c\    emu->flags.need_jmpbuf = 1;' src/emu/x64emu.c
+          sed -i '/\/\/ want some new jmpbuf for error recovery/d' src/emu/x64emu.c
+          sed -i '/emu->flags.need_jmpbuf = 1;/d' src/emu/x64emu.c
           
           mkdir build && cd build
           
