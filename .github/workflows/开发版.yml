@@ -121,6 +121,10 @@ jobs:
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
           
           mkdir build && cd build
+          export CC=clang
+          export CXX=clang++
+          export CFLAGS="-O3 -mcpu=cortex-x3 -mtune=cortex-x3 -Wno-error"
+          export CXXFLAGS="$CFLAGS"
           
           # CMake 配置
           cmake .. \
