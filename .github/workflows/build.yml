@@ -270,6 +270,11 @@ jobs:
           # 修改 CMakeLists.txt 适配 Termux glibc
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+
+          apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
+          apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
+          apply_patch "$GITHUB_WORKSPACE/opt.patch"
+          apply_patch "$GITHUB_WORKSPACE/termux.patch"
           
           mkdir build && cd build
           cmake .. \
