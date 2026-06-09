@@ -271,6 +271,11 @@ jobs:
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
 
+          apply_patch() {
+          patch -p1 -N -f < "$1" || true
+          find . -name "*.rej" -delete 2>/dev/null || true
+          }
+
           apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
           apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
