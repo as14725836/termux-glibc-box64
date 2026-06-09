@@ -1,0 +1,27 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1526,6 +1526,7 @@
+             -DDYNAREC_ASM_STR=${DYNAREC_ASM_STR}
+             -DINTERPRETER_STR=${INTERPRETER_STR}
+             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
++            -DSD8G2=${SD8G2}
+         INSTALL_COMMAND ""
+         TEST_COMMAND ""
+         BUILD_ALWAYS ON
+--- a/wine/wow64/CMakeLists.txt
++++ b/wine/wow64/CMakeLists.txt
+@@ -22,6 +22,14 @@
+ string(REPLACE "," ";" DYNAREC_ASM "${DYNAREC_ASM_STR}")
+ string(REPLACE "," ";" DYNAREC_PASS "${DYNAREC_PASS_STR}")
+ string(REPLACE "," ";" INTERPRETER "${INTERPRETER_STR}")
++
++# Local optimization flags for the WoW64 PE-side wowbox64.dll build.
++# This subproject is built with the MinGW toolchain, separately from the main
++# ELF box64 target, so SD8G2 tuning has to be propagated explicitly.
++set(WOW64_OPT_FLAGS -O2 -DNDEBUG -fno-strict-aliasing -fno-stack-protector)
++if(SD8G2)
++    list(APPEND WOW64_OPT_FLAGS -march=armv8-a+crc+crypto+fp16+dotprod+i8mm+rcpc+sha3+sm4+nosve+nosve2)
++endif()
+ 
+ set(WOW64_MAIN_SRC
+     "${BOX64_ROOT}/wine/common/crt.c"

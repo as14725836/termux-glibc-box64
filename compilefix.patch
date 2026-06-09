@@ -1,0 +1,11 @@
+--- a/src/libtools/threads.c
++++ b/src/libtools/threads.c
+@@ -832,6 +832,8 @@ EXPORT int my_pthread_key_delete(x64emu_t* emu, pthread_key_t key)
+ 	return ret;
+ }
+ 
++static inline void box64_sanitize_mutex_owner_died(pthread_mutex_t* m);
++
+ static pthread_cond_t* alignCond(pthread_cond_t* pc)
+ {
+ #ifndef NOALIGN

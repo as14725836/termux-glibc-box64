@@ -1,0 +1,47 @@
+--- a/src/include/env.h
++++ b/src/include/env.h
+@@ -68,6 +68,7 @@
+     BOOLEAN(BOX64_DYNAREC_NATIVEFLAGS, dynarec_nativeflags, 1, 1)             \
+     STRING(BOX64_DYNAREC_NOHOSTEXT, dynarec_nohostext, 0)                     \
+     INTEGER(BOX64_DYNAREC_PAUSE, dynarec_pause, 0, 0, 3, 1)                   \
++    INTEGER(BOX64_JMPBUF_STRATEGY, jmpbuf_strategy, 0, 0, 3, 1)               \
+     BOOLEAN(BOX64_DYNAREC_PERFMAP, dynarec_perf_map, 0, 0)                    \
+     INTEGER(BOX64_DYNAREC_SAFEFLAGS, dynarec_safeflags, 1, 0, 2, 1)           \
+     INTEGER(BOX64_DYNAREC_STRONGMEM, dynarec_strongmem, 0, 0, 4, 1)           \
+--- a/src/dynarec/dynarec.c
++++ b/src/dynarec/dynarec.c
+@@ -157,7 +157,12 @@
+         PushExit(emu);
+     R_RIP = addr;
+     emu->df = d_none;
+-    if(emu->flags.quitonlongjmp)
++    // BOX64_JMPBUF_STRATEGY:
++    // 0 = upstream behavior
++    // 1 = force a fresh jmpbuf for dynarec calls only
++    // 2 = force a fresh jmpbuf for dynarec + interpreter calls
++    // 3 = mode 2 plus skip initial emu jmpbuf request in x64emu.c
++    if(emu->flags.quitonlongjmp || BOX64ENV(jmpbuf_strategy)>=1)
+         emu->flags.need_jmpbuf = 1;
+     EmuRun(emu, 1, no_alt);
+     emu->quit = 0;  // reset Quit flags...
+--- a/src/emu/x64emu.c
++++ b/src/emu/x64emu.c
+@@ -100,7 +100,8 @@
+     reset_fpu(emu);
+     emu->mxcsr.x32 = 0x1f80;
+     // want some new jmpbuf for error recovery
+-    emu->flags.need_jmpbuf = 1;
++    if(BOX64ENV(jmpbuf_strategy)!=3)
++        emu->flags.need_jmpbuf = 1;
+     reset_deferred_signal(emu);
+ }
+ 
+@@ -594,7 +595,7 @@
+         PushExit(emu);
+     R_RIP = addr;
+     emu->df = d_none;
+-    if(emu->flags.quitonlongjmp)
++    if(emu->flags.quitonlongjmp || BOX64ENV(jmpbuf_strategy)>=2)
+         emu->flags.need_jmpbuf = 1;
+     EmuRun(emu, 0, 0);
+     emu->quit = 0;  // reset Quit flags...

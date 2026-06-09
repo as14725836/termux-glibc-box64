@@ -1,0 +1,156 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -33,6 +33,7 @@
+ option(ANDROID "Set to ON if targeting an Android device" ${ANDROID})
+ option(TERMUX "Set to ON if targeting an Android device with Termux" ${TERMUX})
+ option(WINLATOR_GLIBC "Set to ON if targeting an Android device with Winlator Glibc" ${WINLATOR_GLIBC})
++option(TERMUX_GLIBC_GAMEOPT "Use a less conservative -O2 profile for Termux/Android glibc game builds" OFF)
+ option(USE_CCACHE "Set to ON to use ccache if present in the system" ${USE_CCACHE})
+ option(HAVE_TRACE "Set to ON to have Trace ability (needs libzydis-dev)" ${HAVE_TRACE})
+ option(ZYDIS3 "Set to ON if you have trace and an old libzydis v3.x" ${ZYDIS3})
+@@ -55,12 +56,21 @@
+     set(ANDROID ON CACHE BOOL "")
+ endif()
+ 
+-# Hack: limit the optimization level to -O1 for some platforms
++# Hack: limit the optimization level to -O1 for some platforms.
++# TERMUX_GLIBC_GAMEOPT is an opt-in gaming profile for modern Android/Termux glibc setups.
++# It recovers some interpreter/wrapper-side performance while keeping strict-aliasing disabled.
+ if(TERMUX OR ANDROID)
+-    set(CMAKE_C_FLAGS_RELEASE "-O1")
+-    set(CMAKE_CXX_FLAGS_RELEASE "-O1")
+-    set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O1 -g")
+-    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g")
++    if(TERMUX_GLIBC_GAMEOPT)
++        set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG -fno-strict-aliasing")
++        set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -fno-strict-aliasing")
++        set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -fno-strict-aliasing")
++        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -fno-strict-aliasing")
++    else()
++        set(CMAKE_C_FLAGS_RELEASE "-O1")
++        set(CMAKE_CXX_FLAGS_RELEASE "-O1")
++        set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O1 -g")
++        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O1 -g")
++    endif()
+ endif()
+ 
+ if(LARCH64)
+@@ -159,6 +169,7 @@
+ endif()
+ 
+ include(CheckLinkerFlag)
++include(CheckCCompilerFlag)
+ enable_language(C)
+ check_linker_flag(C "-fuse-ld=gold" HAS_FUSE_LD_GOLD)
+ 
+@@ -214,7 +225,19 @@
+     set(CFLAGS -pipe -march=armv8.4-a+simd+crypto)
+ elseif(SD8G2)
+     add_definitions(-DSD8G2)
+-    set(CFLAGS -pipe -march=armv9-a+i8mm+sm4+sha3+rcpc+crypto+nosve+nosve2)
++    # Snapdragon 8 Gen 2: Cortex-X3/A715/A710/A510 class cores.
++    # Keep SVE/SVE2 disabled because this ARM64 dynarec path does not use them here,
++    # but expose scalar/NEON crypto, fp16, dotprod, i8mm and rcpc to the compiler.
++    set(CFLAGS -pipe -march=armv8-a+crc+crypto+fp16+dotprod+i8mm+rcpc+sha3+sm4+nosve+nosve2)
++    check_c_compiler_flag("-mtune=cortex-x3" HAS_MTUNE_CORTEX_X3)
++    if(HAS_MTUNE_CORTEX_X3)
++        list(APPEND CFLAGS "-mtune=cortex-x3")
++    else()
++        check_c_compiler_flag("-mtune=cortex-a710" HAS_MTUNE_CORTEX_A710)
++        if(HAS_MTUNE_CORTEX_A710)
++            list(APPEND CFLAGS "-mtune=cortex-a710")
++        endif()
++    endif()
+ elseif(SD8EG5)
+     add_definitions(-DSD8EG5)
+     # NOTE
+--- a/src/core.c
++++ b/src/core.c
+@@ -527,15 +527,30 @@
+             AddPath("/data/data/com.termux/files/usr/lib/box64-x86_64-linux-gnu", &context->box64_ld_lib, 1);
+     }
+     #else
+-    //TODO: Add Termux Library Path - Lily
++    // Termux / Termux glibc paths.  A glibc prefix is commonly used by Mobox/PRoot
++    // style setups, while native Termux packages still live under usr/lib.
+     if(box64_is32bits) {
+         #ifdef BOX32
++        if(FileExist("/data/data/com.termux/files/usr/glibc/lib/i386-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/glibc/lib/i386-linux-gnu", &context->box64_ld_lib, 1);
++        if(FileExist("/data/data/com.termux/files/usr/glibc/lib/box64-i386-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/glibc/lib/box64-i386-linux-gnu", &context->box64_ld_lib, 1);
+         if(FileExist("/data/data/com.termux/files/usr/lib/i386-linux-gnu", 0))
+             AddPath("/data/data/com.termux/files/usr/lib/i386-linux-gnu", &context->box64_ld_lib, 1);
++        if(FileExist("/data/data/com.termux/files/usr/lib/box64-i386-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/lib/box64-i386-linux-gnu", &context->box64_ld_lib, 1);
++        if(FileExist("/data/data/com.termux/files/usr/i686-linux-gnu/lib", 0))
++            AddPath("/data/data/com.termux/files/usr/i686-linux-gnu/lib", &context->box64_ld_lib, 1);
+         #endif
+     } else {
++        if(FileExist("/data/data/com.termux/files/usr/glibc/lib/x86_64-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/glibc/lib/x86_64-linux-gnu", &context->box64_ld_lib, 1);
++        if(FileExist("/data/data/com.termux/files/usr/glibc/lib/box64-x86_64-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/glibc/lib/box64-x86_64-linux-gnu", &context->box64_ld_lib, 1);
+         if(FileExist("/data/data/com.termux/files/usr/lib/x86_64-linux-gnu", 0))
+             AddPath("/data/data/com.termux/files/usr/lib/x86_64-linux-gnu", &context->box64_ld_lib, 1);
++        if(FileExist("/data/data/com.termux/files/usr/lib/box64-x86_64-linux-gnu", 0))
++            AddPath("/data/data/com.termux/files/usr/lib/box64-x86_64-linux-gnu", &context->box64_ld_lib, 1);
+     }
+     #endif
+     if(getenv("LD_LIBRARY_PATH"))
+--- a/src/os/hostext_linux.c
++++ b/src/os/hostext_linux.c
+@@ -191,6 +191,17 @@
+         #ifdef HWCAP2_RNG
+         if(hwcap2&HWCAP2_RNG)
+             cpuext.rndr = 1;
++        #endif
++        #ifdef SD8G2
++        // Some Android/PRoot/Termux glibc combinations expose an incomplete auxv.
++        // SD8G2 always has these ARMv8.1+ extensions; users can still disable any
++        // of them with BOX64_DYNAREC_NOHOSTEXT=atomics,aes,...
++        cpuext.crc32 = 1;
++        cpuext.pmull = 1;
++        cpuext.aes = 1;
++        cpuext.atomics = 1;
++        cpuext.sha1 = 1;
++        cpuext.sha2 = 1;
+         #endif
+         if (p) {
+             p = strtok(p, ",");
+--- a/system/box64.box64rc
++++ b/system/box64.box64rc
+@@ -16,6 +16,33 @@
+ # using safest dynarec settings here, as some installers do crazy things
+ BOX64_DYNACACHE=0
+ BOX64_DYNAREC_SAFEFLAGS=2
++BOX64_DYNAREC_BIGBLOCK=0
++BOX64_DYNAREC_CALLRET=0
++
++#
++# Android / Termux glibc / Wine gaming baseline
++# Keep Windows executables more compatible than the fastest profile, while still
++# enabling the major ARM64 dynarec speed paths on modern Snapdragon devices.
++# Per-game sections below or user environment variables can override these.
++#
++[*wine*]
++BOX64_DYNAREC_SAFEFLAGS=1
++BOX64_DYNAREC_STRONGMEM=1
++BOX64_DYNAREC_BIGBLOCK=2
++BOX64_DYNAREC_CALLRET=1
++BOX64_DYNAREC_ALIGNED_ATOMICS=1
++
++[*.exe]
++BOX64_DYNAREC_SAFEFLAGS=1
++BOX64_DYNAREC_STRONGMEM=1
++BOX64_DYNAREC_BIGBLOCK=2
++BOX64_DYNAREC_CALLRET=1
++BOX64_DYNAREC_ALIGNED_ATOMICS=1
++
++[*setup.exe]
++BOX64_DYNACACHE=0
++BOX64_DYNAREC_SAFEFLAGS=2
++BOX64_DYNAREC_STRONGMEM=2
+ BOX64_DYNAREC_BIGBLOCK=0
+ BOX64_DYNAREC_CALLRET=0
+ 
