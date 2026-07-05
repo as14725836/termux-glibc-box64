@@ -122,10 +122,10 @@ jobs:
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
 
           # 修复兼容
-          sed -i '/if(emu->flags.quitonlongjmp)/,/emu->flags.need_jmpbuf = 1;/c\    emu->flags.need_jmpbuf = 1;' src/dynarec/dynarec.c
-          sed -i '/if(emu->flags.quitonlongjmp)/,/emu->flags.need_jmpbuf = 1;/c\    emu->flags.need_jmpbuf = 1;' src/emu/x64emu.c
-          sed -i '/\/\/ want some new jmpbuf for error recovery/d' src/emu/x64emu.c
-          sed -i '/emu->flags.need_jmpbuf = 1;/d' src/emu/x64emu.c
+          # 1. 替换 x64emu.c 中的 if 代码块（直接读取环境变量）
+          sed -i '618,619c\    static int enabled = -1;\n    if (enabled == -1) {\n        const char *s = getenv("BOX64_JMPBUF_STRATEGY");\n        enabled = s ? atoi(s) : 0;\n    }\n    if (enabled) emu->flags.need_jmpbuf = 1;' src/emu/x64emu.c
+          sed -i '160,161c\    static int enabled = -1;\n    if (enabled == -1) {\n        const char *s = getenv("BOX64_JMPBUF_STRATEGY");\n        enabled = s ? atoi(s) : 0;\n    }\n    if (enabled) emu->flags.need_jmpbuf = 1;' src/dynarec/dynarec.c
+          sed -i '102,103d' src/emu/x64emu.c
           
           mkdir build && cd build
           
