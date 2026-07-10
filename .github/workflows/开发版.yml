@@ -121,11 +121,14 @@ jobs:
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
 
-          # 修复兼容
-          # 1. 替换 x64emu.c 中的 if 代码块（直接读取环境变量）
-          sed -i '618,619c\    static int enabled = -1;\n    if (enabled == -1) {\n        const char *s = getenv("BOX64_JMPBUF_STRATEGY");\n        enabled = s ? atoi(s) : 0;\n    }\n    if (enabled) emu->flags.need_jmpbuf = 1;' src/emu/x64emu.c
-          sed -i '160,161c\    static int enabled = -1;\n    if (enabled == -1) {\n        const char *s = getenv("BOX64_JMPBUF_STRATEGY");\n        enabled = s ? atoi(s) : 0;\n    }\n    if (enabled) emu->flags.need_jmpbuf = 1;' src/dynarec/dynarec.c
-          sed -i '102,103d' src/emu/x64emu.c
+          apply_patch() {
+          patch -p1 -N -f < "$1" || true
+          find . -name "*.rej" -delete 2>/dev/null || true
+          }
+          apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
+          apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
+          apply_patch "$GITHUB_WORKSPACE/opt.patch"
+          apply_patch "$GITHUB_WORKSPACE/termux.patch"
           
           mkdir build && cd build
           
