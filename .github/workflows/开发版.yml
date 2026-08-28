@@ -129,6 +129,7 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
+          apply_patch "$GITHUB_WORKSPACE/box64-fex-smc-inline-crc.patch"
           
           mkdir build && cd build
           
