@@ -1,0 +1,75 @@
+diff --git a/src/dynarec/dynablock.c b/src/dynarec/dynablock.c
+index b0e00c3..a628740 100644
+--- a/src/dynarec/dynablock.c
++++ b/src/dynarec/dynablock.c
+@@ -413,7 +413,8 @@ dynablock_t* DBGetBlock(x64emu_t* emu, uintptr_t addr, int create, int is32bits)
+                 if(db->always_test) {
+                     if(db->always_test==2) {
+                         db->always_test = 0;
+-                        protectDB((uintptr_t)db->x64_addr, db->x64_size);
++                        if(BOX64ENV(dynarec_smc)!=2)
++                            protectDB((uintptr_t)db->x64_addr, db->x64_size);
+                     }
+                     // always_test==1 (NEVERCLEAN): skip protectDB, the page has mixed
+                     // code+data and mprotect would strip writability from data regions
+@@ -426,7 +427,8 @@ dynablock_t* DBGetBlock(x64emu_t* emu, uintptr_t addr, int create, int is32bits)
+                         ClearCache(db->block, db->size);
+                     }
+                     #endif
+-                    protectDBJumpTable((uintptr_t)db->x64_addr, db->x64_size, db->block, db->jmpnext);
++                    if(BOX64ENV(dynarec_smc)!=2)
++                        protectDBJumpTable((uintptr_t)db->x64_addr, db->x64_size, db->block, db->jmpnext);
+                     if(!db->always_test)
+                         for(int i=0; i<db->sep_size; ++i) {
+                             uint32_t x64_offs = db->sep[i].x64_offs;
+diff --git a/src/dynarec/dynarec_native.c b/src/dynarec/dynarec_native.c
+index a8c5896..1f5d7e7 100644
+--- a/src/dynarec/dynarec_native.c
++++ b/src/dynarec/dynarec_native.c
+@@ -577,8 +577,9 @@ dynablock_t* FillBlock64(uintptr_t addr, int is32bits, int inst_max, int is_new,
+         }
+         dynarec_log(LOG_INFO, "Warning: some static area curruption appeared (current=%p, redundant=%p)\n", current_helper, redundant_helper);
+     }
+-    // protect the 1st page
+-    protectDB(addr, 1);
++    // protect the 1st page (skip in FEX-style inline-CRC mode: no page protection, blocks self-validate)
++    if(BOX64ENV(dynarec_smc)!=2)
++        protectDB(addr, 1);
+     if(box64_pagesize>4096)
+         prot = getProtection_fast(addr);    // update protection as it might got a NEVERCLEAN tag because of the protectDB for large pagesize
+     // init the helper
+@@ -701,7 +702,8 @@ dynablock_t* FillBlock64(uintptr_t addr, int is32bits, int inst_max, int is_new,
+             // protect the block of it goes over the 1st page
+             if(!is_inhotpage)
+                 if((addr&~(box64_pagesize-1))!=(end&~(box64_pagesize-1))) // need to protect some other pages too
+-                    protectDB(addr, end-addr);  //end is 1byte after actual end
++                    if(BOX64ENV(dynarec_smc)!=2)
++                        protectDB(addr, end-addr);  //end is 1byte after actual end
+             // compute hash signature
+             uint32_t hash = X31_hash_code((void*)addr, end-addr);
+             // calculate barriers
+diff --git a/src/dynarec/dynarec_native_pass.c b/src/dynarec/dynarec_native_pass.c
+index a576a87..9bf3cb8 100644
+--- a/src/dynarec/dynarec_native_pass.c
++++ b/src/dynarec/dynarec_native_pass.c
+@@ -162,7 +162,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int
+         if(!ninst) {
+             if(dyn->have_purge)
+                 doEnterBlock(dyn, 0, x1, x2, x3);
+-            if(dyn->always_test)
++            if(dyn->always_test || BOX64DRENV(dynarec_smc)==2)
+                 checkCRC(dyn, 0);
+             if(dyn->insts[0].preload_xmmymm)
+                 doPreload(dyn, 0);
+diff --git a/src/include/env.h b/src/include/env.h
+index 8c7b83a..4f48914 100644
+--- a/src/include/env.h
++++ b/src/include/env.h
+@@ -68,6 +68,7 @@ extern char* ftrace_name;
+     INTEGER(BOX64_DYNAREC_PAUSE, dynarec_pause, 0, 0, 3, 1, 2)                   \
+     BOOLEAN(BOX64_DYNAREC_PERFMAP, dynarec_perf_map, 0, 0, 0)                    \
+     INTEGER(BOX64_DYNAREC_SAFEFLAGS, dynarec_safeflags, 1, 0, 2, 1, 2)           \
++    INTEGER(BOX64_DYNAREC_SMC, dynarec_smc, 0, 0, 2, 0, 2)                          \
+     INTEGER(BOX64_DYNAREC_STRONGMEM, dynarec_strongmem, 0, 0, 4, 1, 3)           \
+     BOOLEAN(BOX64_DYNAREC_TBB, dynarec_tbb, 1, 0, 0)                             \
+     STRING(BOX64_DYNAREC_TEST, dynarec_test_str, 1, 0)                           \
