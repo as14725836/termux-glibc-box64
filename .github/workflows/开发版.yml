@@ -120,6 +120,7 @@ jobs:
           # 修改 CMakeLists.txt 适配 Termux glibc
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+          sed -i 's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' src/libtools/signals.c
 
           apply_patch() {
           patch -p1 -N -f < "$1" || true
