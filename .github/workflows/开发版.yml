@@ -122,7 +122,19 @@ jobs:
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
           sed -i 's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' src/libtools/signals.c
           sed -i '/^        static uintptr_t old_addr = 0;$/a\        if((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)) {\n            uintptr_t page = (uintptr_t)addr \& ~(box64_pagesize-1);\n            if(mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC)==0) {\n                setProtection(page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);\n                printf_log(LOG_DEBUG, "Force-added WRITE to r-x page %p (si_addr=%p)\\n", (void*)page, (void*)addr);\n                return;\n            }\n        }' src/libtools/signals.c
-
+          sed -i '/^[[:space:]]*if(sig==5)[[:space:]]*{$/,/^[[:space:]]*}$/c\
+          if(sig==5 || (sig == X64_SIGSEGV \&\& code == 0xbad0)) {\
+            char prev[8 * 3];\
+            char opcode[32 * 3];\
+            FormatPeekBytes(emu, -8, 8, prev, sizeof(prev));\
+            FormatPeekBytes(emu, 0, 32, opcode, sizeof(opcode));\
+            printf_log(LOG_NONE,\
+                "\\tBOX64 EXCEPTION: sig=%d code=0x%x RIP=%p CS=0x%04x\\n",\
+                sig, code, (void*)R_RIP, emu->segs[_CS]);\
+            printf_log(LOG_NONE,\
+                "\\tOpcode [-8,+31]: %s | %s\\n",\
+                prev, opcode);\
+          }' src/os/emit_signals_linux.c
 
           apply_patch() {
           patch -p1 -N -f < "$1" || true
