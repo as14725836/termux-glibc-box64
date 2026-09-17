@@ -3,10 +3,10 @@ name: 开发版 Box64 (aarch64)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'  # 每5分钟运行一次
 
 permissions:
-  contents: write
+  contents: write  # 允许 GITHUB_TOKEN 创建 Release
 
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
@@ -17,383 +17,185 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
-
-      # ============================================================
-      # 检出当前仓库
-      # ============================================================
+      # 🔹 检出当前仓库
       - name: 检出仓库
         uses: actions/checkout@v4
-
-      # ============================================================
-      # 修复依赖
-      # ============================================================
+      
+      # 🔹 修复依赖
       - name: 修复依赖
         run: |
           sudo rm -rf /var/lib/apt/lists/*
           sudo apt update
-
-      # ============================================================
-      # 安装依赖
-      # ============================================================
+      
+      # 🔹 安装依赖
       - name: 安装依赖
         run: |
-          sudo apt-get install -y \
-            cmake \
-            build-essential \
-            gcc \
-            git \
-            patchelf \
-            jq \
-            curl \
-            unzip
-
-      # ============================================================
-      # 获取最新提交信息
-      # ============================================================
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
+      
+      # 🔹 获取最新提交信息
       - name: 获取最新提交信息
         id: get_info
         run: |
-          LATEST_COMMIT_FULL=$(git ls-remote "${{ env.SRC_REPO }}" HEAD | awk '{print $1}')
+          # 获取最新 commit 完整哈希
+          LATEST_COMMIT_FULL=$(git ls-remote ${{ env.SRC_REPO }} HEAD | awk '{print $1}')
           LATEST_COMMIT_SHORT=${LATEST_COMMIT_FULL:0:8}
-
-          curl -s \
-            "https://api.github.com/repos/ptitSeb/box64/commits/$LATEST_COMMIT_FULL" \
-            -o commit.json
-
+          
+          # 获取提交时间和作者
+          curl -s "https://api.github.com/repos/ptitSeb/box64/commits/$LATEST_COMMIT_FULL" -o commit.json
           COMMIT_DATE=$(jq -r '.commit.author.date' commit.json | cut -d'T' -f1)
           COMMIT_AUTHOR=$(jq -r '.commit.author.name' commit.json)
           COMMIT_MESSAGE=$(jq -r '.commit.message' commit.json | head -n1)
-
+          
+          # 获取当前日期作为版本号
           CURRENT_DATE=$(date +%Y%m%d%H%M)
           VERSION="dev-${CURRENT_DATE}-${LATEST_COMMIT_SHORT}"
-
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "LATEST_COMMIT=$LATEST_COMMIT_FULL" >> "$GITHUB_ENV"
-          echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> "$GITHUB_ENV"
-          echo "COMMIT_DATE=$COMMIT_DATE" >> "$GITHUB_ENV"
-          echo "COMMIT_AUTHOR=$COMMIT_AUTHOR" >> "$GITHUB_ENV"
-          echo "COMMIT_MESSAGE=$COMMIT_MESSAGE" >> "$GITHUB_ENV"
-
+          
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "LATEST_COMMIT=$LATEST_COMMIT_FULL" >> $GITHUB_ENV
+          echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> $GITHUB_ENV
+          echo "COMMIT_DATE=$COMMIT_DATE" >> $GITHUB_ENV
+          echo "COMMIT_AUTHOR=$COMMIT_AUTHOR" >> $GITHUB_ENV
+          echo "COMMIT_MESSAGE=$COMMIT_MESSAGE" >> $GITHUB_ENV
+          
           echo "📊 构建信息:"
           echo "   版本: $VERSION"
           echo "   提交: $LATEST_COMMIT_SHORT"
           echo "   作者: $COMMIT_AUTHOR"
           echo "   日期: $COMMIT_DATE"
-
-      # ============================================================
-      # 获取上次构建的提交
-      # ============================================================
+      
+      # 🔹 获取上次构建的提交
       - name: 获取上次构建信息
         id: get_last
         run: |
           if [ -f "${{ env.LAST_DEV_COMMIT_FILE }}" ]; then
             LAST_BUILD=$(cat "${{ env.LAST_DEV_COMMIT_FILE }}")
             echo "👉 上次构建提交: ${LAST_BUILD:0:8}"
-            echo "last_build=$LAST_BUILD" >> "$GITHUB_OUTPUT"
+            echo "last_build=$LAST_BUILD" >> $GITHUB_OUTPUT
           else
             echo "👉 首次构建，无历史记录"
-            echo "last_build=none" >> "$GITHUB_OUTPUT"
+            echo "last_build=none" >> $GITHUB_OUTPUT
           fi
-
-      # ============================================================
-      # 判断是否需要构建
-      # ============================================================
+      
+      # 🔹 判断是否需要构建
       - name: 检查是否需要构建
         id: check_build
         run: |
           LAST_BUILD="${{ steps.get_last.outputs.last_build }}"
           CURRENT_COMMIT="${{ env.LATEST_COMMIT }}"
-
+          
           if [ "$CURRENT_COMMIT" = "$LAST_BUILD" ]; then
             echo "✅ 无新提交，跳过构建"
-            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+            echo "skip_build=true" >> $GITHUB_OUTPUT
           else
             echo "🟢 检测到新提交，准备构建"
-            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> $GITHUB_OUTPUT
           fi
-
-      # ============================================================
-      # 跳过无更新构建
-      # ============================================================
+      
+      # 🔹 跳过无更新构建
       - name: 跳过构建
         if: steps.check_build.outputs.skip_build == 'true'
         run: |
           echo "✅ 无新提交，跳过构建"
           exit 0
-
-      # ============================================================
-      # 克隆 Box64 并构建
-      # ============================================================
+      
+      # 🔹 克隆 Box64 并构建
       - name: 克隆 Box64 并构建
         if: steps.check_build.outputs.skip_build == 'false'
         run: |
-
-          # --------------------------------------------------------
           # 清理旧目录
-          # --------------------------------------------------------
           rm -rf box64
-
-          # --------------------------------------------------------
-          # 克隆最新源码
-          # --------------------------------------------------------
-          git clone "${{ env.SRC_REPO }}" box64
-
+          
+          # 克隆最新源码（完整克隆，因为需要 revert）
+          git clone ${{ env.SRC_REPO }} box64
+          
           cd box64
-
-          # --------------------------------------------------------
-          # 设置 Termux glibc 环境
-          # --------------------------------------------------------
+      
+          
+          # 设置 Termux glibc 环境变量
           unset LD_PRELOAD
-
           export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
-          export PATH="$GLIBC_PREFIX/bin:$PATH"
-          export LD_LIBRARY_PATH="$GLIBC_PREFIX/lib:${LD_LIBRARY_PATH:-}"
-
-          # --------------------------------------------------------
-          # CMakeLists.txt 适配 Termux glibc
-          # --------------------------------------------------------
-          sed -i \
-            's|/usr|/data/data/com.termux/files/usr/glibc|g' \
-            CMakeLists.txt
-
-          sed -i \
-            's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' \
-            CMakeLists.txt
-
-          # ========================================================
-          # signals.c：允许 R-X 页面进行异常处理
-          # ========================================================
-
-          sed -i \
-            's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' \
-            src/libtools/signals.c
-
-          # --------------------------------------------------------
-          # R-X 页面强制添加 WRITE
-          # --------------------------------------------------------
-          sed -i \
-            '/^        static uintptr_t old_addr = 0;$/a\
-          if((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)) {\
-              uintptr_t page = (uintptr_t)addr \& ~(box64_pagesize-1);\
-              if(mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC)==0) {\
-                  setProtection(page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);\
-                  printf_log(LOG_DEBUG, "Force-added WRITE to r-x page %p (si_addr=%p)\\n", (void*)page, (void*)addr);\
-                  return;\
-              }\
-          }' \
-            src/libtools/signals.c
-
-          # ========================================================
-          # emit_signals_linux.c：异常 opcode 日志
-          # ========================================================
-
-          sed -i \
-            '/^[[:space:]]*if(sig==5)[[:space:]]*{$/,/^[[:space:]]*}$/c\
+          export PATH=$GLIBC_PREFIX/bin:$PATH
+          export LD_LIBRARY_PATH=$GLIBC_PREFIX/lib:$LD_LIBRARY_PATH
+          
+          # 修改 CMakeLists.txt 适配 Termux glibc
+          sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
+          sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+          sed -i 's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' src/libtools/signals.c
+          sed -i '/^        static uintptr_t old_addr = 0;$/a\        if((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)) {\n            uintptr_t page = (uintptr_t)addr \& ~(box64_pagesize-1);\n            if(mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC)==0) {\n                setProtection(page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);\n                printf_log(LOG_DEBUG, "Force-added WRITE to r-x page %p (si_addr=%p)\\n", (void*)page, (void*)addr);\n                return;\n            }\n        }' src/libtools/signals.c
+          sed -i '/^[[:space:]]*if(sig==5)[[:space:]]*{$/,/^[[:space:]]*}$/c\
           if(sig==5 || (sig == X64_SIGSEGV \&\& code == 0xbad0)) {\
-              char prev[8 * 3];\
-              char opcode[32 * 3];\
-              FormatPeekBytes(emu, -8, 8, prev, sizeof(prev));\
-              FormatPeekBytes(emu, 0, 32, opcode, sizeof(opcode));\
-              printf_log(LOG_NONE,\
-                  "\\tBOX64 EXCEPTION: sig=%d code=0x%x RIP=%p CS=0x%04x\\n",\
-                  sig, code, (void*)R_RIP, emu->segs[_CS]);\
-              printf_log(LOG_NONE,\
-                  "\\tOpcode [-8,+31]: %s | %s\\n",\
-                  prev, opcode);\
-          }' \
-            src/os/emit_signals_linux.c
-
-          # ========================================================
-          # signals.c：BOX64 SIGNAL CHANGED
-          # ========================================================
-
-          sed -i \
-            '/^[[:space:]]*if(memcmp(sigcontext, \&sigcontext_copy, sizeof(x64_ucontext_t)))/a\
+            char prev[8 * 3];\
+            char opcode[32 * 3];\
+            FormatPeekBytes(emu, -8, 8, prev, sizeof(prev));\
+            FormatPeekBytes(emu, 0, 32, opcode, sizeof(opcode));\
+            printf_log(LOG_NONE,\
+                "\\tBOX64 EXCEPTION: sig=%d code=0x%x RIP=%p CS=0x%04x\\n",\
+                sig, code, (void*)R_RIP, emu->segs[_CS]);\
+            printf_log(LOG_NONE,\
+                "\\tOpcode [-8,+31]: %s | %s\\n",\
+                prev, opcode);\
+          }' src/os/emit_signals_linux.c
+          sed -i '/^[[:space:]]*if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t)))/a\
           printf_log(LOG_INFO,\
-              "BOX64 SIGNAL CHANGED: bad0=%d db=%p jmpbuf=%p RIP=%p RSP=%p skip=%d\\n",\
-              (sig == X64_SIGSEGV \&\& info->si_errno == 0xbad0),\
-              db, emu->jmpbuf,\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
-              skip);' \
-            src/libtools/signals.c
-
-          # ========================================================
-          # signals.c：RunFunctionHandler BEFORE
-          # ========================================================
-
-          sed -i \
-            '/^[[:space:]]*ret = RunFunctionHandler(emu, \&exits, dynarec, sigcontext, my_context->signals\[info2->si_signo\], 3, info2->si_signo, info2, sigcontext);$/i\
-          printf_log(LOG_INFO,\
-              "BOX64 HANDLER BEFORE: RIP=%p RSP=%p RAX=%p emu_ip=%p old_ip=%p dynarec=%d\\n",\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RAX],\
-              (void*)emu->ip.q[0],\
-              (void*)emu->old_ip,\
-              dynarec);' \
-            src/libtools/signals.c
-
-          # ========================================================
-          # signals.c：RunFunctionHandler AFTER
-          # ========================================================
-
-          sed -i \
-            '/^[[:space:]]*ret = RunFunctionHandler(emu, \&exits, dynarec, sigcontext, my_context->signals\[info2->si_signo\], 3, info2->si_signo, info2, sigcontext);$/a\
-          printf_log(LOG_INFO,\
-              "BOX64 HANDLER AFTER: RIP=%p RSP=%p RAX=%p emu_ip=%p old_ip=%p ret=%d exits=%d\\n",\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
-              (void*)sigcontext->uc_mcontext.gregs[X64_RAX],\
-              (void*)emu->ip.q[0],\
-              (void*)emu->old_ip,\
-              ret, exits);' \
-            src/libtools/signals.c
-
-            sed -i '/tmp8u = F8;/a\
-            printf_log(LOG_INFO,\
-                "BOX64 INT: RIP=%p opcode=CD %02X addr=%p " \
-                "RAX=%p RBX=%p RCX=%p RDX=%p " \
-                "RSP=%p RBP=%p CS=%04x EFLAGS=0x%llx\\n",\
-                (void*)R_RIP,\
-                tmp8u,\
-                (void*)addr,\
-                (void*)R_RAX,\
-                (void*)R_RBX,\
-                (void*)R_RCX,\
-                (void*)R_RDX,\
-                (void*)R_RSP,\
-                (void*)R_RBP,\
-                R_CS,\
-                (unsigned long long)emu->eflags.x64);' src/emu/x64run.c
-
-          # ========================================================
-          # 验证源码修改
-          # ========================================================
-
-          echo
-          echo "============================================================"
-          echo "检查 BOX64 SIGNAL CHANGED"
-          echo "============================================================"
-
-          grep -n -A8 -B2 \
-            "BOX64 SIGNAL CHANGED" \
-            src/libtools/signals.c || true
-
-          echo
-          echo "============================================================"
-          echo "检查 HANDLER BEFORE"
-          echo "============================================================"
-
-          grep -n -A8 -B2 \
-            "BOX64 HANDLER BEFORE" \
-            src/libtools/signals.c || true
-
-          echo
-          echo "============================================================"
-          echo "检查 HANDLER AFTER"
-          echo "============================================================"
-
-          grep -n -A8 -B2 \
-            "BOX64 HANDLER AFTER" \
-            src/libtools/signals.c || true
-
-          # ========================================================
-          # 应用仓库现有 patch
-          # ========================================================
+            "BOX64 SIGNAL CHANGED: bad0=%d db=%p jmpbuf=%p RIP=%p RSP=%p skip=%d\\n",\
+            (sig == X64_SIGSEGV && info->si_errno == 0xbad0),\
+            db, emu->jmpbuf,\
+            (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
+            (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
+            skip);' src/libtools/signals.c
 
           apply_patch() {
-            patch -p1 -N -f < "$1" || true
-            find . -name "*.rej" -delete 2>/dev/null || true
+          patch -p1 -N -f < "$1" || true
+          find . -name "*.rej" -delete 2>/dev/null || true
           }
-
           apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
           apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
-
-          # ========================================================
-          # 创建构建目录
-          # ========================================================
-
-          rm -rf build
-          mkdir build
-          cd build
-
-          # ========================================================
+          
+          mkdir build && cd build
+          
           # CMake 配置
-          # ========================================================
-
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DWINLATOR_GLIBC=ON \
             -DARM64=ON \
-            -DSD8G2=ON
-
-          # ========================================================
+            -DSD8G2=ON 
+          
           # 编译
-          # ========================================================
-
-          make -j"$(nproc)"
-
+          make -j$(nproc)
           echo "✅ 构建完成"
-
-          # ========================================================
-          # 修复动态链接器路径
-          # ========================================================
-
-          patchelf \
-            --set-interpreter \
-            /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 \
-            ./box64
-
-          # ========================================================
-          # 检查生成文件
-          # ========================================================
-
+          
+          # 修复动态链接器路径（Termux glibc）
+          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 ./box64
+          
+          # 检查生成的二进制文件
           if [ -f "box64" ]; then
             echo "✅ 生成可执行文件: box64"
-
             file box64
             ls -lh box64
-
-            echo
+            
+            # 显示版本信息
             echo "📌 Box64 版本:"
-            ./box64 --version 2>&1 || true
-
+            ./box64 --version 2>&1 || echo "⚠️ 无法获取版本信息"
           else
             echo "❌ 未找到 box64 可执行文件"
             exit 1
           fi
-
-          # ========================================================
+          
           # 打包
-          # ========================================================
-
           cd ../..
-
           TAR_FILE="termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz"
-
-          tar -czvf \
-            "$TAR_FILE" \
-            -C box64/build \
-            box64
-
-          echo "TAR_FILE=$TAR_FILE" >> "$GITHUB_ENV"
-
+          tar -czvf $TAR_FILE -C box64/build box64
+          
+          echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
           echo "✅ 打包完成: $TAR_FILE"
-
-          # ========================================================
+          
           # 保存构建记录
-          # ========================================================
-
-          echo "${{ env.LATEST_COMMIT }}" \
-            > "${{ env.LAST_DEV_COMMIT_FILE }}"
-
-      # ============================================================
-      # 上传构建产物
-      # ============================================================
+          echo "${{ env.LATEST_COMMIT }}" > "${{ env.LAST_DEV_COMMIT_FILE }}"
+      
+      # 🔹 上传构建产物
       - name: 上传构建产物
         if: steps.check_build.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
@@ -401,10 +203,8 @@ jobs:
           name: box64-dev-${{ env.VERSION }}
           path: ${{ env.TAR_FILE }}
           retention-days: 7
-
-      # ============================================================
-      # 保存 commit 记录
-      # ============================================================
+      
+      # 🔹 保存 commit 记录
       - name: 保存构建记录
         if: steps.check_build.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
@@ -412,22 +212,18 @@ jobs:
           name: last-dev-box64-commit
           path: ${{ env.LAST_DEV_COMMIT_FILE }}
           retention-days: 90
-
-      # ============================================================
-      # 发布 GitHub Release
-      # ============================================================
+      
+      # 🔹 发布到 GitHub Release
       - name: 发布到 GitHub Release
         if: steps.check_build.outputs.skip_build == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: box64-dev-${{ env.VERSION }}
           name: "Box64 开发版 ${{ env.VERSION }} (aarch64, Termux glibc)"
-
           body: |
             ## 🚀 Box64 自动构建 - 开发版
-
+            
             ### 📅 构建信息
-
             | 项目 | 信息 |
             |------|------|
             | **版本** | `${{ env.VERSION }}` |
@@ -435,71 +231,44 @@ jobs:
             | **作者** | `${{ env.COMMIT_AUTHOR }}` |
             | **提交日期** | `${{ env.COMMIT_DATE }}` |
             | **提交消息** | `${{ env.COMMIT_MESSAGE }}` |
-            | **构建时间** | 自动构建 |
+            | **构建时间** | `$(date -u +"%Y-%m-%d %H:%M:%S UTC")` |
             | **平台** | `aarch64` |
             | **环境** | `Termux glibc` |
-
+            
             ### ⚙️ 编译选项
-
             ```cmake
             -DARM_DYNAREC=ON
             -DCMAKE_BUILD_TYPE=Release
-            -DWINLATOR_GLIBC=ON
             -DARM64=ON
+            -DSD845=ON
+            -DSD865=ON
+            -DSD888=ON
             -DSD8G2=ON
+            -DSD8EG5=ON
             ```
-
-            ### 🔍 本版本新增诊断
-
-            包含 Box64 signal/context 调试日志：
-
-            ```text
-            BOX64 EXCEPTION
-            BOX64 SIGNAL CHANGED
-            BOX64 HANDLER BEFORE
-            BOX64 HANDLER AFTER
-            ```
-
-            用于定位：
-
-            ```text
-            guest RIP
-                ↓
-            RunFunctionHandler()
-                ↓
-            signal context
-                ↓
-            mctx2emu()
-                ↓
-            Dynarec resume
-            ```
-
+            
             ### 📥 安装方法
-
             ```bash
-            tar -xzf termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz \
-              -C /data/data/com.termux/files/usr/glibc/
-
+            # 1. 下载并解压
+            tar -xzf termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/
+            
+            # 2. 设置环境变量（添加到 ~/.bashrc）
             export PATH=/data/data/com.termux/files/usr/glibc/bin:$PATH
             export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/glibc/lib:$LD_LIBRARY_PATH
-
+            
+            # 3. 测试运行
             box64 --version
             ```
-
+            
             ### ⚠️ 注意事项
-
-            - 这是自动构建的开发版
-            - 基于上游最新提交
-            - 可能包含尚未验证的代码
-            - 每 5 分钟检查一次上游更新
-            - 本版本主要用于 Box64 signal/context 问题调试
-
+            - 这是**自动构建的开发版**，基于最新代码，可能不稳定
+            - 每5分钟检查一次上游更新，有新提交时自动构建
+            - 建议测试后再用于生产环境
+            
             ---
             *🤖 本 Release 由 GitHub Actions 自动构建生成*
-
           files: ${{ env.TAR_FILE }}
           draft: false
           prerelease: true
-
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
