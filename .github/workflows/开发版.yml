@@ -250,6 +250,23 @@ jobs:
               ret, exits);' \
             src/libtools/signals.c
 
+            sed -i '/tmp8u = F8;/a\
+            printf_log(LOG_INFO,\
+                "BOX64 INT: RIP=%p opcode=CD %02X addr=%p " \
+                "RAX=%p RBX=%p RCX=%p RDX=%p " \
+                "RSP=%p RBP=%p CS=%04x EFLAGS=0x%llx\\n",\
+                (void*)R_RIP,\
+                tmp8u,\
+                (void*)addr,\
+                (void*)R_RAX,\
+                (void*)R_RBX,\
+                (void*)R_RCX,\
+                (void*)R_RDX,\
+                (void*)R_RSP,\
+                (void*)R_RBP,\
+                R_CS,\
+                (unsigned long long)emu->eflags.x64);' src/emu/x64run.c
+
           # ========================================================
           # 验证源码修改
           # ========================================================
