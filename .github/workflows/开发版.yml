@@ -135,6 +135,14 @@ jobs:
                 "\\tOpcode [-8,+31]: %s | %s\\n",\
                 prev, opcode);\
           }' src/os/emit_signals_linux.c
+          sed -i '/^[[:space:]]*if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t)))/a\
+          printf_log(LOG_INFO,\
+            "BOX64 SIGNAL CHANGED: bad0=%d db=%p jmpbuf=%p RIP=%p RSP=%p skip=%d\\n",\
+            (sig == X64_SIGSEGV && info->si_errno == 0xbad0),\
+            db, emu->jmpbuf,\
+            (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
+            (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
+            skip);' src/libtools/signals.c
 
           apply_patch() {
           patch -p1 -N -f < "$1" || true
