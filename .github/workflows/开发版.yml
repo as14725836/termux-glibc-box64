@@ -143,6 +143,65 @@ jobs:
             (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
             (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
             skip);' src/libtools/signals.c
+            python3 - <<'PY'
+            from pathlib import Path
+
+            p = Path("src/libtools/signals.c")
+            s = p.read_text()
+
+            # 1. BOX64 SIGNAL CHANGED
+            old = '''    if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t))) {
+            #if defined(DYNAREC)'''
+
+            new = '''    if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t))) {
+            printf_log(LOG_INFO,
+            "BOX64 SIGNAL CHANGED: bad0=%d db=%p jmpbuf=%p RIP=%p RSP=%p skip=%d\\\\n",
+            (sig == X64_SIGSEGV && info->si_errno == 0xbad0),
+            db, emu->jmpbuf,
+            (void*)sigcontext->uc_mcontext.gregs[X64_RIP],
+            (void*)sigcontext->uc_mcontext.gregs[X64_RSP],
+            skip);
+            #if defined(DYNAREC)'''
+
+           if old not in s:
+            raise SystemExit("SIGNAL CHANGED insertion point not found")
+
+            s = s.replace(old, new, 1)
+
+            # 2. BEFORE / AFTER RunFunctionHandler
+            old = '''    ret = RunFunctionHandler(emu, &exits, dynarec, sigcontext, my_context->signals[info2->si_signo], 3, info2->si_signo, info2, sigcontext);
+            if(used_stack)'''
+
+            new = '''    printf_log(LOG_INFO,
+            "BOX64 HANDLER BEFORE: RIP=%p RSP=%p RAX=%p emu_ip=%p old_ip=%p dynarec=%d\\\\n",
+            (void*)sigcontext->uc_mcontext.gregs[X64_RIP],
+            (void*)sigcontext->uc_mcontext.gregs[X64_RSP],
+            (void*)sigcontext->uc_mcontext.gregs[X64_RAX],
+            (void*)emu->ip.q[0],
+            (void*)emu->old_ip,
+            dynarec);
+
+            ret = RunFunctionHandler(emu, &exits, dynarec, sigcontext, my_context->signals[info2->si_signo], 3, info2->si_signo, info2, sigcontext);
+
+            printf_log(LOG_INFO,
+          "BOX64 HANDLER AFTER: RIP=%p RSP=%p RAX=%p emu_ip=%p old_ip=%p ret=%d exits=%d\\\\n",
+           (void*)sigcontext->uc_mcontext.gregs[X64_RIP],
+           (void*)sigcontext->uc_mcontext.gregs[X64_RSP],
+           (void*)sigcontext->uc_mcontext.gregs[X64_RAX],
+           (void*)emu->ip.q[0],
+           (void*)emu->old_ip,
+           ret, exits);
+
+           if(used_stack)'''
+
+           if old not in s:
+           raise SystemExit("RunFunctionHandler insertion point not found")
+
+           s = s.replace(old, new, 1)
+
+           p.write_text(s)
+           print("signals.c diagnostic patch applied successfully")
+           PY
 
           apply_patch() {
           patch -p1 -N -f < "$1" || true
