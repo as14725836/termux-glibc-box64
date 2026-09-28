@@ -152,6 +152,32 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
+
+          python3 - << 'PYEOF'
+          f = 'src/dynarec/arm64/dynarec_arm64_helper.h'
+          s = open(f).read()
+
+          old = '''#define SET_DFNONE()                      \\
+          do {                                  \\
+          if (dyn->f != status_none) {      \\
+            dyn->f = status_none_pending; \\
+          }                                 \\
+          } while (0)'''
+
+          new = '''#define SET_DFNONE()                      \\
+          do {                                  \\
+          if (dyn->f != status_none) {      \\
+            FORCE_DFNONE();               \\
+            dyn->f = status_none;         \\
+          }                                 \\
+          } while (0)'''
+
+          if old not in s:
+          print("ERROR: 没找到原始 SET_DFNONE，把当前内容发我")
+          else:
+          open(f, 'w').write(s.replace(old, new, 1))
+          print("OK: 方案 A 已移植到新版")
+          PYEOF
           
           mkdir build && cd build
           
