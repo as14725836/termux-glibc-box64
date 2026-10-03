@@ -143,8 +143,8 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
 
-          # 应用 dfnone 修复（方案 A）—— 用独立脚本，避免 heredoc 缩进问题
-          python3 "$GITHUB_WORKSPACE/fix_dfnone.py"
+          # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
+          python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
 
           mkdir -p build && cd build
 

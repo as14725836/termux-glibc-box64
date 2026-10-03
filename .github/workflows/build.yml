@@ -280,6 +280,9 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
+
+          # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
+          python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
           
           mkdir build && cd build
           cmake .. \
