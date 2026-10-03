@@ -231,7 +231,7 @@ jobs:
             - `jmpbuf.patch`
             - `opt.patch`
             - `termux.patch`
-            - **dfnone 修复**（SET_DFNONE 立即刷新，修 Wine/游戏崩溃）
+            - **dfnone 修复**：新增运行时变量 `BOX64_DYNAREC_DFNONE_OLD`（默认 `1` = 旧版立即刷新行为；设 `0` 恢复上游行为）
 
             ### 📥 安装方法
             ```bash
