@@ -138,7 +138,12 @@ jobs:
             # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
 
           if [ "${{ github.event.inputs.apply_dfnone_fix }}" = "true" ]; then
-            python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败"; exit 1; }
+            if ! python3 "$GITHUB_WORKSPACE/fix_dfnone.py"; then
+              echo "⚠️ dfnone 修复未完全套用（该 ref 代码形状不同），继续构建——产物视为“未带 df 修复”"
+              echo "DFNONE_FIX=partial-failed" >> $GITHUB_ENV
+            else
+              echo "DFNONE_FIX=ok" >> $GITHUB_ENV
+            fi
           else
             echo "ℹ️ 跳过 dfnone 修复（该 ref 早于 2025-11-28，不需要）"
           fi
@@ -193,7 +198,7 @@ jobs:
             | **提交时间** | `${{ env.COMMIT_DATE }}` |
             | **提交消息** | `${{ env.COMMIT_MESSAGE }}` |
             | **signals 加壳补丁** | `${{ github.event.inputs.signals_hacks }}` |
-            | **dfnone 修复** | `${{ github.event.inputs.apply_dfnone_fix }}` |
+            | **dfnone 修复** | `${{ github.event.inputs.apply_dfnone_fix }}` / 实际: `${{ env.DFNONE_FIX }}` |
 
             ### 📥 安装
             ```bash
