@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      apply_olddf_fixes:
+        description: "A 方案：在旧 df 机器底座上再套 olddf-newfixes.patch"
+        required: false
+        default: false
+        type: boolean
       release_suffix:
         description: 'Release 名称后缀'
         required: false
@@ -136,6 +141,10 @@ jobs:
             apply_patch "$GITHUB_WORKSPACE/termux.patch"
   
             # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
+
+          if [ "${{ github.event.inputs.apply_olddf_fixes }}" = "true" ]; then
+            apply_patch "$GITHUB_WORKSPACE/olddf-newfixes.patch"
+          fi
 
           if [ "${{ github.event.inputs.apply_dfnone_fix }}" = "true" ]; then
             if ! python3 "$GITHUB_WORKSPACE/fix_dfnone.py"; then
