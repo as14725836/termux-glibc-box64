@@ -179,6 +179,7 @@ jobs:
             -DWINLATOR_GLIBC=ON \
             -DARM64=ON \
             -DSD8G2=ON \
+            -DWOW64=ON \
             -DARM64EC=ON
 
           make -j$(nproc)
