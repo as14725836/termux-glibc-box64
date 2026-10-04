@@ -94,10 +94,23 @@ def fix_pass(path):
     return "fail"
 
 
+def applicable():
+    """旧代（pre-deferred-flags 枚举）代码里没有这些标记，视为不需要改，直接成功退出。"""
+    try:
+        h = open(HELPER).read()
+        e = open(ENV_H).read()
+    except Exception:
+        return True
+    return "status_none_pending" in h
+
+
 def main():
     if not os.path.exists(HELPER):
         print("ERROR: 找不到 " + HELPER + "（请在 box64 源码根目录运行）")
         return 1
+    if not applicable():
+        print("dfnone fix not applicable (pre-v0.4.0 model), skipped")
+        return 0
     bad = []
     for path, fn in [(ENV_H, add_env), (HELPER, fix_macro)] + [(p, fix_pass) for p in PASSES]:
         r = fn(path)
