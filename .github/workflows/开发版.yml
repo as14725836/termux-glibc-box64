@@ -190,21 +190,34 @@ jobs:
             echo "✅ 生成可执行文件: box64"
             file box64
             ls -lh box64
-            echo "📌 Box64 版本:"
-            ./box64 --version 2>&1 || echo "⚠️ 无法获取版本信息"
           else
             echo "❌ 未找到 box64 可执行文件"
             exit 1
           fi
 
-          cd ../..
-          TAR_FILE="termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz"
-          tar -czvf $TAR_FILE -C box64/build box64
+          # ===== 收集所有产物 =====
+          cd "$GITHUB_WORKSPACE"
+          rm -rf dist && mkdir -p dist
+
+          # 主可执行文件
+          cp -a box64/build/box64 dist/
+
+          # 所有 dll（含藏在 box64ec-prefix 里的 box64ec.dll）
+          find box64/build -name "*.dll" -exec cp -a {} dist/ \;
+
+          echo "===== dist 内容 ====="
+          ls -lh dist/
+
+          TAR_FILE="termux-glibc-box64-dev-${VERSION}.tar.gz"
+          tar -czvf "$TAR_FILE" -C dist .
+
+          echo "===== 包内文件 ====="
+          tar -tzvf "$TAR_FILE"
 
           echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
           echo "✅ 打包完成: $TAR_FILE"
 
-          echo "${{ env.LATEST_COMMIT }}" > "${{ env.LAST_DEV_COMMIT_FILE }}"
+          echo "${LATEST_COMMIT}" > "${LAST_DEV_COMMIT_FILE}"
 
       - name: 上传构建产物
         if: steps.check_build.outputs.skip_build == 'false'
@@ -263,9 +276,10 @@ jobs:
 
             ### 📥 安装方法
             ```bash
-            tar -xzf termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/
+            mkdir -p /data/data/com.termux/files/usr/glibc/box64
+            tar -xzf termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/box64/
 
-            export PATH=/data/data/com.termux/files/usr/glibc/bin:$PATH
+            export PATH=/data/data/com.termux/files/usr/glibc/box64:$PATH
             export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/glibc/lib:$LD_LIBRARY_PATH
 
             box64 --version
@@ -275,6 +289,7 @@ jobs:
             - 这是**自动构建的开发版**，基于最新代码，可能不稳定
             - 定时检查上游更新，有新提交时自动构建
             - 建议测试后再用于生产环境
+            - 包内含 `box64` 与 `box64ec.dll`
 
             ---
             *🤖 本 Release 由 GitHub Actions 自动构建生成*
