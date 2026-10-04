@@ -35,6 +35,7 @@ CONV_RE = re.compile(r"^\s*if\(.*status_none_pending\)\s*dyn->f\s*=\s*status_non
 
 ENV_H = "src/include/env.h"
 HELPER = "src/dynarec/arm64/dynarec_arm64_helper.h"
+HELPER_C = "src/dynarec/arm64/dynarec_arm64_helper.c"
 PASSES = ["src/dynarec/arm64/dynarec_arm64_pass0.h",
           "src/dynarec/arm64/dynarec_arm64_pass1.h"]
 
@@ -94,6 +95,20 @@ def fix_pass(path):
     return "fail"
 
 
+def fix_transform(path):
+    s = open(path).read()
+    if "dfnone_old_tx" in s:
+        return "already"
+    anchor = "    if(dyn->insts[jmp].df_notneeded)" + chr(10) + "        return;"
+    line = ("    if(BOX64ENV(dynarec_dfnone_old) && dyn->insts[jmp].f_entry==status_none && "
+            "dyn->insts[ninst].f_exit!=status_none && !(dyn->insts[jmp].x64.need_before&X_PEND)) { FORCE_DFNONE(); } // dfnone_old_tx")
+    k = s.find(anchor)
+    if k < 0:
+        return "fail"
+    k += len(anchor)
+    s = s[:k] + chr(10) + line + s[k:]
+    open(path, "w").write(s)
+    return "ok"
 def applicable():
     """旧代（pre-deferred-flags 枚举）代码里没有这些标记，视为不需要改，直接成功退出。"""
     try:
@@ -112,7 +127,7 @@ def main():
         print("dfnone fix not applicable (pre-v0.4.0 model), skipped")
         return 0
     bad = []
-    for path, fn in [(ENV_H, add_env), (HELPER, fix_macro)] + [(p, fix_pass) for p in PASSES]:
+    for path, fn in [(ENV_H, add_env), (HELPER, fix_macro), (HELPER_C, fix_transform)] + [(p, fix_pass) for p in PASSES]:
         r = fn(path)
         print("%-46s: %s" % (path, r))
         if r == "fail":
