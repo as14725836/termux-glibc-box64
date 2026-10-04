@@ -11,10 +11,8 @@ permissions:
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
   LAST_DEV_COMMIT_FILE: last_dev_box64_commit.txt
-  # llvm-mingw (bylaws fork，含 arm64ec)
-  FEX_LLVMMINGW_TAG: "20241119"
-  FEX_LLVMMINGW_NAME: "llvm-mingw-20241119-ucrt-ubuntu-20.04-aarch64"
-  FEX_LLVMMINGW_DIR: "llvm-mingw-20241119-ucrt-ubuntu-20.04-aarch64"
+  FEX_LLVMMINGW_TAG: "20250920"
+  FEX_LLVMMINGW_NAME: "llvm-mingw-20250920-ucrt-ubuntu-22.04-aarch64"
 
 jobs:
   build:
@@ -38,8 +36,11 @@ jobs:
           tar -xJf "${FEX_LLVMMINGW_NAME}.tar.xz"
           rm -f "${FEX_LLVMMINGW_NAME}.tar.xz"
 
-          echo "/tmp/${FEX_LLVMMINGW_DIR}/bin" >> $GITHUB_PATH
-          export PATH="/tmp/${FEX_LLVMMINGW_DIR}/bin:${PATH}"
+          DIR="${FEX_LLVMMINGW_NAME}"
+          echo "解压目录: /tmp/${DIR}"
+
+          echo "/tmp/${DIR}/bin" >> $GITHUB_PATH
+          export PATH="/tmp/${DIR}/bin:${PATH}"
 
           echo "=== FEX 交叉工具链检查 ==="
           MISSING=0
@@ -118,24 +119,20 @@ jobs:
       - name: 克隆 Box64 并构建
         if: steps.check_build.outputs.skip_build == 'false'
         run: |
-          # 确认交叉编译器在 PATH
           which arm64ec-w64-mingw32-clang || { echo "❌ arm64ec 工具链未找到"; exit 1; }
 
           rm -rf box64
           git clone ${{ env.SRC_REPO }} box64
           cd box64
 
-          # Termux glibc 环境
           unset LD_PRELOAD
           export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
           export PATH=$GLIBC_PREFIX/bin:$PATH
           export LD_LIBRARY_PATH=$GLIBC_PREFIX/lib:$LD_LIBRARY_PATH
 
-          # 修改 CMakeLists.txt 适配 Termux glibc
           sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
           sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
 
-          # 信号处理补丁（signals.c）
           sed -i 's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' src/libtools/signals.c
 
           sed -i '/^        static uintptr_t old_addr = 0;$/a\        if((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)) {\n            uintptr_t page = (uintptr_t)addr \& ~(box64_pagesize-1);\n            if(mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC)==0) {\n                setProtection(page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);\n                printf_log(LOG_DEBUG, "Force-added WRITE to r-x page %p (si_addr=%p)\\n", (void*)page, (void*)addr);\n                return;\n            }\n        }' src/libtools/signals.c
@@ -163,7 +160,6 @@ jobs:
             (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
             skip);' src/libtools/signals.c
 
-          # 应用补丁集
           apply_patch() {
             patch -p1 -N -f < "$1" || true
             find . -name "*.rej" -delete 2>/dev/null || true
@@ -173,12 +169,10 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
 
-          # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
           python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
 
           mkdir -p build && cd build
 
-          # 保留 ARM64EC；工具链已在 PATH，box64ec 子项目可找到 arm64ec-w64-mingw32-clang
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
