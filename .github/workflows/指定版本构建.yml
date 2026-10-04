@@ -1,0 +1,214 @@
+name: 指定版本 Box64 (aarch64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      box64_ref:
+        description: '要构建的上游 ref（提交 SHA / tag / 分支，支持 X~1）'
+        required: true
+        default: 'b0ef9838a3cca7be5069a04ca09daaf8d44a5e2f'
+      signals_hacks:
+        description: '应用 signals.c 加壳补丁（放宽 SMC 页保护 + 打印异常）'
+        required: false
+        default: true
+        type: boolean
+      apply_dfnone_fix:
+        description: '应用 dfnone 修复脚本（仅对 2025-11-28 之后的代码有意义）'
+        required: false
+        default: false
+        type: boolean
+      release_suffix:
+        description: 'Release 名称后缀'
+        required: false
+        default: 'good'
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  SRC_REPO: https://github.com/ptitSeb/box64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 修复依赖
+        run: |
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt update
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
+
+      - name: 克隆 Box64 并切到指定 ref
+        run: |
+          REF="${{ github.event.inputs.box64_ref }}"
+          rm -rf box64
+          git clone ${{ env.SRC_REPO }} box64
+          cd box64
+          git fetch --tags origin
+          if ! git rev-parse --verify -q "$REF" >/dev/null; then
+            echo "尝试作为远端 ref 解析: $REF"
+            git fetch origin "$REF" || true
+          fi
+          git checkout "$REF" || { echo "❌ 无法切换到 ref: $REF"; exit 1; }
+
+          COMMIT_HASH=$(git rev-parse HEAD)
+          SHORT=${COMMIT_HASH:0:8}
+          SUFFIX="${{ github.event.inputs.release_suffix }}"
+          SUFFIX=$(echo "$SUFFIX" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          [ -z "$SUFFIX" ] && SUFFIX=ref
+          VERSION="${SUFFIX}-${SHORT}"
+
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "SHORT=$SHORT" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "COMMIT_DATE=$(git log -1 --format=%cd --date=iso)" >> $GITHUB_ENV
+          echo "COMMIT_AUTHOR=$(git log -1 --format=%an)" >> $GITHUB_ENV
+          echo "COMMIT_MESSAGE=$(git log -1 --format=%s)" >> $GITHUB_ENV
+          echo "BOX64_REF=$REF" >> $GITHUB_ENV
+
+          echo "📝 构建信息:"
+          echo "   ref   : $REF"
+          echo "   提交  : $COMMIT_HASH"
+          echo "   版本  : $VERSION"
+          echo "   日期  : $(git log -1 --format=%cd --date=iso)"
+
+      - name: 构建 Box64
+        run: |
+          cd box64
+
+          unset LD_PRELOAD
+          export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
+          export PATH=$GLIBC_PREFIX/bin:$PATH
+          export LD_LIBRARY_PATH=$GLIBC_PREFIX/lib:$LD_LIBRARY_PATH
+
+          sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
+          sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+
+          if [ "${{ github.event.inputs.signals_hacks }}" = "true" ]; then
+            echo "🔧 应用 signals.c 加壳补丁"
+            # 信号处理补丁（signals.c）
+            sed -i 's/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC)))/(info->si_code == SEGV_ACCERR) \&\& ((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_WRITE|PROT_EXEC) || (prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)))/' src/libtools/signals.c
+  
+            sed -i '/^        static uintptr_t old_addr = 0;$/a\        if((prot\&~PROT_CUSTOM)==(PROT_READ|PROT_EXEC)) {\n            uintptr_t page = (uintptr_t)addr \& ~(box64_pagesize-1);\n            if(mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC)==0) {\n                setProtection(page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);\n                printf_log(LOG_DEBUG, "Force-added WRITE to r-x page %p (si_addr=%p)\\n", (void*)page, (void*)addr);\n                return;\n            }\n        }' src/libtools/signals.c
+  
+            sed -i '/^[[:space:]]*if(sig==5)[[:space:]]*{$/,/^[[:space:]]*}$/c\
+            if(sig==5 || (sig == X64_SIGSEGV \&\& code == 0xbad0)) {\
+              char prev[8 * 3];\
+              char opcode[32 * 3];\
+              FormatPeekBytes(emu, -8, 8, prev, sizeof(prev));\
+              FormatPeekBytes(emu, 0, 32, opcode, sizeof(opcode));\
+              printf_log(LOG_NONE,\
+                  "\\tBOX64 EXCEPTION: sig=%d code=0x%x RIP=%p CS=0x%04x\\n",\
+                  sig, code, (void*)R_RIP, emu->segs[_CS]);\
+              printf_log(LOG_NONE,\
+                  "\\tOpcode [-8,+31]: %s | %s\\n",\
+                  prev, opcode);\
+            }' src/os/emit_signals_linux.c
+  
+            sed -i '/^[[:space:]]*if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t)))/a\
+            printf_log(LOG_INFO,\
+              "BOX64 SIGNAL CHANGED: bad0=%d db=%p jmpbuf=%p RIP=%p RSP=%p skip=%d\\n",\
+              (sig == X64_SIGSEGV && info->si_errno == 0xbad0),\
+              db, emu->jmpbuf,\
+              (void*)sigcontext->uc_mcontext.gregs[X64_RIP],\
+              (void*)sigcontext->uc_mcontext.gregs[X64_RSP],\
+              skip);' src/libtools/signals.c
+          else
+            echo "ℹ️ 跳过 signals.c 加壳补丁"
+          fi
+
+            # 应用补丁集
+            apply_patch() {
+              patch -p1 -N -f < "$1" || true
+              find . -name "*.rej" -delete 2>/dev/null || true
+            }
+            apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
+            apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
+            apply_patch "$GITHUB_WORKSPACE/opt.patch"
+            apply_patch "$GITHUB_WORKSPACE/termux.patch"
+  
+            # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
+
+          if [ "${{ github.event.inputs.apply_dfnone_fix }}" = "true" ]; then
+            python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败"; exit 1; }
+          else
+            echo "ℹ️ 跳过 dfnone 修复（该 ref 早于 2025-11-28，不需要）"
+          fi
+
+          mkdir -p build && cd build
+          cmake .. \
+            -DARM_DYNAREC=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWINLATOR_GLIBC=ON \
+            -DARM64=ON \
+            -DSD8G2=ON
+          make -j$(nproc)
+          echo "✅ 构建完成"
+
+          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 ./box64
+
+          if [ -f "box64" ]; then
+            file box64
+            ls -lh box64
+            ./box64 --version 2>&1 || true
+          else
+            echo "❌ 未找到 box64"
+            exit 1
+          fi
+
+          cd ../..
+          TAR_FILE="termux-glibc-box64-${{ env.VERSION }}.tar.gz"
+          tar -czvf "$TAR_FILE" -C box64/build box64
+          echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
+          echo "✅ 打包完成: $TAR_FILE"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: box64-${{ env.VERSION }}
+          path: ${{ env.TAR_FILE }}
+          retention-days: 30
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: box64-${{ env.VERSION }}
+          name: "Box64 ${{ env.VERSION }} (aarch64, Termux glibc)"
+          body: |
+            ## 🎯 指定 ref 构建（用于回归定位）
+
+            | 项目 | 信息 |
+            |------|------|
+            | **上游 ref** | `${{ env.BOX64_REF }}` |
+            | **提交哈希** | `${{ env.COMMIT_HASH }}` |
+            | **作者** | `${{ env.COMMIT_AUTHOR }}` |
+            | **提交时间** | `${{ env.COMMIT_DATE }}` |
+            | **提交消息** | `${{ env.COMMIT_MESSAGE }}` |
+            | **signals 加壳补丁** | `${{ github.event.inputs.signals_hacks }}` |
+            | **dfnone 修复** | `${{ github.event.inputs.apply_dfnone_fix }}` |
+
+            ### 📥 安装
+            ```bash
+            tar -xzf termux-glibc-box64-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/
+            box64 --version
+            ```
+
+            ### 💡 背景
+            `b0ef9838...` 是上游 `[ARM64_DYNAREC] Made defered dfnone effect`（`c64a431e`，2025-11-28）
+            的**父提交**，即被 bisect 出来的「最后一个能跑加壳游戏的版本」。
+
+            ---
+            *🤖 本 Release 由 GitHub Actions 构建*
+          files: ${{ env.TAR_FILE }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
