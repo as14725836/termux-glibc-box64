@@ -1,26 +1,11 @@
-# A 方案补丁：旧 df 机器（da76e7e2）底座 + 上游较新的信号/SMC 修复
-# 来源：从 da76e7e2 起 cherry-pick 以下提交（其余因依赖新版延迟标志模型而跳过）：
-#
-#   d22ec9d1 [DYNAREC] Resume regular signal with Dynarec
-#   4a646031 [DYNAREC] Mark a hopage before changing protection
-#   ac72abcc [DYNAREC] Fixed a potential regression of f1f572a  with large page size
-#   54783dcf [SIGNAL] Preserved previous handlers, flags, masks, restorer, and alternate-stack state (#4194)
-#   2a66af98 [SIGNAL] Don't build signal frame when the guest handler is SIG_DFL or SIG_IGN (#4313)
-#   0f3ad04c [SIGNAL] Die with the signal instead of aborting when the guest handler is SIG_DFL (#4300)
-#   6bebfdd4 [SIGNAL] Re-raise software-generated fatal signals (#4400)
-diff --git a/src/dynarec/dynarec_native.c b/src/dynarec/dynarec_native.c
-index 2753cf08..3dfd628d 100644
---- a/src/dynarec/dynarec_native.c
-+++ b/src/dynarec/dynarec_native.c
-@@ -440,6 +440,8 @@ dynablock_t* FillBlock64(uintptr_t addr, int alternate, int is32bits, int inst_m
-     }
-     // protect the 1st page
-     protectDB(addr, 1);
-+    if(box64_pagesize>4096)
-+        prot = getProtection_fast(addr);    // update protection as it might got a NEVERCLEAN tag because of the protectDB for large pagesize
-     // init the helper
-     dynarec_native_t helper = {0};
-     dynarec_native_t* dyn = &helper;
+# A 方案补丁：旧 df 机器底座 da76e7e2 + 上游较新的信号/页保护修复
+# cherry-pick 来源（其余因依赖新版“延迟标志”模型或缺失前置变量而跳过）：
+#   d85e411a [DYNAREC] Resume regular signal with Dynarec
+#   47ff1db2 [DYNAREC] Mark a hopage before changing protection
+#   ddcc99db [SIGNAL] Preserved previous handlers, flags, masks, restorer, and alternate-stack state (#4194)
+#   7f4f23f7 [SIGNAL] Don't build signal frame when the guest handler is SIG_DFL or SIG_IGN (#4313)
+#   19c57d69 [SIGNAL] Die with the signal instead of aborting when the guest handler is SIG_DFL (#4300)
+#   1186eba4 [SIGNAL] Re-raise software-generated fatal signals (#4400)
 diff --git a/src/include/box64context.h b/src/include/box64context.h
 index 37d7cdda..974ce1ac 100644
 --- a/src/include/box64context.h
