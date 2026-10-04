@@ -3,7 +3,7 @@ name: 开发版 Box64 (aarch64)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: write
@@ -11,6 +11,10 @@ permissions:
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
   LAST_DEV_COMMIT_FILE: last_dev_box64_commit.txt
+  # llvm-mingw (bylaws fork，含 arm64ec)
+  FEX_LLVMMINGW_TAG: "20241119"
+  FEX_LLVMMINGW_NAME: "llvm-mingw-20241119-ucrt-ubuntu-20.04-aarch64"
+  FEX_LLVMMINGW_DIR: "llvm-mingw-20241119-ucrt-ubuntu-20.04-aarch64"
 
 jobs:
   build:
@@ -20,14 +24,41 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 修复依赖
-        run: |
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt update
-
       - name: 安装依赖
         run: |
-          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip \
+            clang lld llvm ninja-build wget tar xz-utils
+
+      - name: 安装 llvm-mingw (bylaws fork, 含 arm64ec)
+        run: |
+          cd /tmp
+          wget -q --show-progress \
+            "https://github.com/bylaws/llvm-mingw/releases/download/${FEX_LLVMMINGW_TAG}/${FEX_LLVMMINGW_NAME}.tar.xz"
+          tar -xJf "${FEX_LLVMMINGW_NAME}.tar.xz"
+          rm -f "${FEX_LLVMMINGW_NAME}.tar.xz"
+
+          echo "/tmp/${FEX_LLVMMINGW_DIR}/bin" >> $GITHUB_PATH
+          export PATH="/tmp/${FEX_LLVMMINGW_DIR}/bin:${PATH}"
+
+          echo "=== FEX 交叉工具链检查 ==="
+          MISSING=0
+          for T in \
+            arm64ec-w64-mingw32-clang \
+            arm64ec-w64-mingw32-clang++ \
+            arm64ec-w64-mingw32-dlltool \
+            aarch64-w64-mingw32-clang \
+            aarch64-w64-mingw32-clang++ \
+            aarch64-w64-mingw32-dlltool
+          do
+            if command -v "$T" >/dev/null 2>&1; then
+              printf '✅ %-38s %s\n' "$T" "$(command -v "$T")"
+            else
+              printf '❌ %-38s MISSING\n' "$T"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" -eq 0 ] || { echo "❌ 交叉工具链不完整"; exit 1; }
 
       - name: 获取最新提交信息
         id: get_info
@@ -42,6 +73,7 @@ jobs:
 
           CURRENT_DATE=$(date +%Y%m%d%H%M)
           VERSION="dev-${CURRENT_DATE}-${LATEST_COMMIT_SHORT}"
+          BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
 
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "LATEST_COMMIT=$LATEST_COMMIT_FULL" >> $GITHUB_ENV
@@ -49,6 +81,7 @@ jobs:
           echo "COMMIT_DATE=$COMMIT_DATE" >> $GITHUB_ENV
           echo "COMMIT_AUTHOR=$COMMIT_AUTHOR" >> $GITHUB_ENV
           echo "COMMIT_MESSAGE=$COMMIT_MESSAGE" >> $GITHUB_ENV
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
 
           echo "📊 构建信息:"
           echo "   版本: $VERSION"
@@ -82,15 +115,12 @@ jobs:
             echo "skip_build=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: 跳过构建
-        if: steps.check_build.outputs.skip_build == 'true'
-        run: |
-          echo "✅ 无新提交，跳过构建"
-          exit 0
-
       - name: 克隆 Box64 并构建
         if: steps.check_build.outputs.skip_build == 'false'
         run: |
+          # 确认交叉编译器在 PATH
+          which arm64ec-w64-mingw32-clang || { echo "❌ arm64ec 工具链未找到"; exit 1; }
+
           rm -rf box64
           git clone ${{ env.SRC_REPO }} box64
           cd box64
@@ -148,6 +178,7 @@ jobs:
 
           mkdir -p build && cd build
 
+          # 保留 ARM64EC；工具链已在 PATH，box64ec 子项目可找到 arm64ec-w64-mingw32-clang
           cmake .. \
             -DARM_DYNAREC=ON \
             -DCMAKE_BUILD_TYPE=Release \
@@ -202,7 +233,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: box64-dev-${{ env.VERSION }}
-          name: "Box64 开发版 ${{ env.VERSION }} (aarch64, Termux glibc)"
+          name: "Box64 开发版 ${{ env.VERSION }} (aarch64, Termux glibc, ARM64EC)"
           body: |
             ## 🚀 Box64 自动构建 - 开发版
 
@@ -214,9 +245,10 @@ jobs:
             | **作者** | `${{ env.COMMIT_AUTHOR }}` |
             | **提交日期** | `${{ env.COMMIT_DATE }}` |
             | **提交消息** | `${{ env.COMMIT_MESSAGE }}` |
-            | **构建时间** | `$(date -u +"%Y-%m-%d %H:%M:%S UTC")` |
+            | **构建时间** | `${{ env.BUILD_TIME }}` |
             | **平台** | `aarch64` |
             | **环境** | `Termux glibc` |
+            | **交叉工具链** | `bylaws/llvm-mingw ${{ env.FEX_LLVMMINGW_TAG }}` |
 
             ### ⚙️ 编译选项
             ```cmake
@@ -225,6 +257,7 @@ jobs:
             -DWINLATOR_GLIBC=ON
             -DARM64=ON
             -DSD8G2=ON
+            -DARM64EC=ON
             ```
 
             ### 🔧 已应用补丁
@@ -246,7 +279,7 @@ jobs:
 
             ### ⚠️ 注意事项
             - 这是**自动构建的开发版**，基于最新代码，可能不稳定
-            - 每5分钟检查一次上游更新，有新提交时自动构建
+            - 定时检查上游更新，有新提交时自动构建
             - 建议测试后再用于生产环境
 
             ---
