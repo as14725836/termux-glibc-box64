@@ -1,0 +1,16 @@
+# 47ff1db2 单独（改页保护前标热页）
+# cherry-pick: 38a4a2c7
+diff --git a/src/libtools/signals.c b/src/libtools/signals.c
+index a8280802..a617e3f0 100644
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -1614,8 +1614,8 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
+             db_searched = 1;
+         }
+         // access error, unprotect the block (and mark them dirty)
+-        unprotectDB((uintptr_t)addr, 1, 1);    // unprotect 1 byte... But then, the whole page will be unprotected
+         CheckHotPage((uintptr_t)addr, prot);
++        unprotectDB((uintptr_t)addr, 1, 1);    // unprotect 1 byte... But then, the whole page will be unprotected
+         int db_need_test = (db && !BOX64ENV(dynarec_dirty))?getNeedTest((uintptr_t)db->x64_addr):0;
+         if(db && ((addr>=db->x64_addr && addr<(db->x64_addr+db->x64_size)) || db_need_test)) {
+             emu = getEmuSignal(emu, p, db);

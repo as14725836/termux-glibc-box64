@@ -17,11 +17,11 @@ on:
         required: false
         default: false
         type: boolean
-      apply_olddf_fixes:
-        description: "A 方案：在旧 df 机器底座上再套 olddf-newfixes.patch"
+      olddf_patch:
+        description: "要额外套用的补丁文件名（仓库根目录，留空则不改）"
         required: false
-        default: false
-        type: boolean
+        default: ""
+        type: string
       release_suffix:
         description: 'Release 名称后缀'
         required: false
@@ -142,8 +142,8 @@ jobs:
   
             # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
 
-          if [ "${{ github.event.inputs.apply_olddf_fixes }}" = "true" ]; then
-            apply_patch "$GITHUB_WORKSPACE/olddf-newfixes.patch"
+          if [ -n "${{ github.event.inputs.olddf_patch }}" ]; then
+            apply_patch "$GITHUB_WORKSPACE/${{ github.event.inputs.olddf_patch }}"
           fi
 
           if [ "${{ github.event.inputs.apply_dfnone_fix }}" = "true" ]; then

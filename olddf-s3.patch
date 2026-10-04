@@ -1,0 +1,76 @@
+# 7f4f23f7+19c57d69+1186eba4（SIG_DFL / 软件信号抛掷 三条一组）
+# cherry-pick: e6ddae9f, 711b07a7, b40b2f12
+diff --git a/src/libtools/signals.c b/src/libtools/signals.c
+index a8280802..313446d0 100644
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -105,7 +105,20 @@ uint64_t RunFunctionHandler(x64emu_t* emu, int* exit, int dynarec, x64_ucontext_
+         va_end (va);
+         printf_log(LOG_NONE, "%04d|Warning, calling Signal %d function handler %s\n", GetTID(), sig, fnc?"SIG_IGN":"SIG_DFL");
+         if(fnc==0) {
+-            printf_log(LOG_NONE, "Unhandled signal caught, aborting\n");
++            printf_log(LOG_NONE, "Unhandled signal caught, dying with the signal\n");
++            // restore the default handler for this signal, unblock it and re-raise it, 
++            // so the process dies with the expected signal (e.g. SIGSEGV) instead of aborting with SIGABRT.
++            struct sigaction sa;
++            memset(&sa, 0, sizeof(sa));
++            sa.sa_handler = SIG_DFL;
++            sigemptyset(&sa.sa_mask);
++            sigaction(sig, &sa, NULL);
++            sigset_t mask;
++            sigemptyset(&mask);
++            sigaddset(&mask, sig);
++            sigprocmask(SIG_UNBLOCK, &mask, NULL);
++            raise(sig);
++            // should not reach here
+             abort();
+         }
+         return 0;
+@@ -954,6 +967,30 @@ void my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, sigi
+ 
+     printf_log(LOG_DEBUG, "Sigactionhanlder for signal #%d called (jump to %p/%s)\n", sig, (void*)my_context->signals[sig], GetNativeName((void*)my_context->signals[sig]));
+ 
++    uintptr_t fnc = my_context->signals[sig];
++    if (fnc == 0 || fnc == 1) {
++        int host_sig = signal_from_x64(sig);
++        if (fnc == 1 || host_sig == SIGCHLD || host_sig == SIGURG || host_sig == SIGWINCH || host_sig == SIGCONT) {
++            // SIG_IGN, or a signal which default action is to ignore
++            relockMutex(Locks);
++            return 1;
++        }
++        printf_log(LOG_NONE, "%04d|Warning, calling Signal %d function handler SIG_DFL\n", GetTID(), sig);
++        printf_log(LOG_NONE, "Unhandled signal caught, dying with the signal\n");
++        struct sigaction sa;
++        memset(&sa, 0, sizeof(sa));
++        sa.sa_handler = SIG_DFL;
++        sigemptyset(&sa.sa_mask);
++        sigaction(host_sig, &sa, NULL);
++        sigset_t rmask;
++        sigemptyset(&rmask);
++        sigaddset(&rmask, host_sig);
++        sigprocmask(SIG_UNBLOCK, &rmask, NULL);
++        relockMutex(Locks);
++        raise(host_sig);
++        abort(); // should not reach here
++    }
++
+     uintptr_t restorer = my_context->restorer[sig];
+     // get that actual ESP first!
+     if(!emu)
+@@ -1985,7 +2022,15 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "%04d|Repeated SIGSEGV with Access error on %
+     // no handler (or double identical segfault)
+     // set default and that's it, instruction will restart and default segfault handler will be called...
+     if(my_context->signals[sig]!=1 || sig==X64_SIGSEGV || sig==X64_SIGILL || sig==X64_SIGFPE || sig==X64_SIGABRT) {
+-        signal(signal_from_x64(sig), (void*)my_context->signals[sig]);
++        int native_sig = signal_from_x64(sig);
++        signal(native_sig, (void*)my_context->signals[sig]);
++        if(my_context->signals[sig] == (uintptr_t)SIG_DFL && info && info->si_code <= 0 && (sig==X64_SIGBUS || sig==X64_SIGSEGV || sig==X64_SIGILL || sig==X64_SIGFPE || sig==X64_SIGABRT)) {
++            sigset_t set;
++            sigemptyset(&set);
++            sigaddset(&set, native_sig);
++            sigprocmask(SIG_UNBLOCK, &set, NULL);
++            raise(native_sig);
++        }
+     }
+ }
+ 

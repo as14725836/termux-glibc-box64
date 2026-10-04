@@ -1,0 +1,28 @@
+# d85e411a 单独（signal 恢复走 dynarec）
+# cherry-pick: 38d64bab
+diff --git a/src/libtools/signal32.c b/src/libtools/signal32.c
+index 994ef476..e9f0d992 100644
+--- a/src/libtools/signal32.c
++++ b/src/libtools/signal32.c
+@@ -583,7 +583,7 @@ void my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigi
+     uint32_t mmapped = memExist((uintptr_t)info->si_addr);
+     uint32_t sysmapped = (info->si_addr<(void*)box64_pagesize)?1:mmapped;
+     uint32_t real_prot = 0;
+-    int skip = 1;   // in case sigjump is used to restore exectuion, 1 will switch to interpreter, 3 will switch to dynarec
++    int skip = 3;   // in case sigjump is used to restore exectuion, 1 will switch to interpreter, 3 will switch to dynarec
+     if(prot&PROT_READ) real_prot|=PROT_READ;
+     if(prot&PROT_WRITE) real_prot|=PROT_WRITE;
+     if(prot&PROT_EXEC) real_prot|=PROT_WRITE;
+diff --git a/src/libtools/signals.c b/src/libtools/signals.c
+index a8280802..c3294d13 100644
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -1076,7 +1076,7 @@ void my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, sigi
+     uint32_t mmapped = memExist((uintptr_t)info->si_addr);
+     uint32_t sysmapped = (info->si_addr<(void*)box64_pagesize)?1:mmapped;
+     uint32_t real_prot = 0;
+-    int skip = 1;   // in case sigjump is used to restore exectuion, 1 will switch to interpreter, 3 will switch to dynarec
++    int skip = 3;   // in case sigjump is used to restore exectuion, 1 will switch to interpreter, 3 will switch to dynarec
+     if(prot&PROT_READ) real_prot|=PROT_READ;
+     if(prot&PROT_WRITE) real_prot|=PROT_WRITE;
+     if(prot&PROT_EXEC) real_prot|=PROT_WRITE;
