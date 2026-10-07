@@ -1,0 +1,90 @@
+diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
+index 10c0f34..de446a6 100644
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -4053,6 +4053,40 @@ EXPORT int my_munmap(x64emu_t* emu, void* addr, size_t length)
+     return ret;
+ }
+ 
++#if defined(ANDROID) || defined(TERMUX) || defined(WINLATOR_GLIBC)
++/* [Android W^X workaround]
++ *
++ * Android 10+ (targetSdkVersion >= 29) runs apps in the untrusted_app SELinux
++ * domain, which refuses mprotect(PROT_EXEC) on app-private-storage-backed
++ * memory. Guest mprotect() calls then fail, breaking loaders and protectors
++ * that mark code pages executable.
++ *
++ * box64 never executes guest pages natively: every guest instruction is JIT'ed
++ * into box64's own code cache, which is allocated with MAP_ANONYMOUS and is
++ * therefore still allowed to be executable. Stripping PROT_EXEC from the *host*
++ * mapping of guest memory is thus safe.
++ *
++ * Only the flags handed to the host mprotect() are stripped. box64's own
++ * bookkeeping (updateProtection / setGuestProtection) still receives the
++ * original flags, so guest-visible page attributes and the SMC / write
++ * protection state machine are unaffected.
++ *
++ * Set BOX64_ANDROID_WX=0 to get the upstream behaviour back.
++ */
++static int box64_android_wx_strip(void)
++{
++    static int cached = -1;
++    if(cached < 0) {
++        const char* e = getenv("BOX64_ANDROID_WX");
++        cached = (!e || (e[0] != '0' && e[0] != 'n' && e[0] != 'N' && e[0] != 'f' && e[0] != 'F')) ? 1 : 0;
++    }
++    return cached;
++}
++#define BOX64_HOST_MPROT(p) (box64_android_wx_strip() ? ((p) & ~PROT_EXEC) : (p))
++#else
++#define BOX64_HOST_MPROT(p) (p)
++#endif
++
+ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+ {
+     #ifdef DYNAREC
+@@ -4065,7 +4099,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+         prot|=PROT_READ;    // PROT_READ is implicit with PROT_WRITE on x86_64
+     uintptr_t start = (uintptr_t)addr;
+     if(box64_pagesize == X86_PAGE_SIZE) {
+-        int ret = mprotect(addr, len, prot);
++        int ret = mprotect(addr, len, BOX64_HOST_MPROT(prot));
+         if(!ret && len) {
+             updateProtection(start, len, prot);
+             setGuestProtection(start, len, prot, 0);
+@@ -4083,7 +4117,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+ 
+     if(host_end - host_start == box64_pagesize && (start != host_start || end != host_end)) {
+         int host_prot = prot | (getProtection(host_start) & ~PROT_CUSTOM);
+-        int ret = mprotect((void*)host_start, box64_pagesize, host_prot);
++        int ret = mprotect((void*)host_start, box64_pagesize, BOX64_HOST_MPROT(host_prot));
+         if(!ret) {
+             updateProtection(host_start, box64_pagesize, host_prot);
+             setGuestProtection(start, end - start, prot, 0);
+@@ -4093,7 +4127,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+ 
+     if(start != host_start) {
+         int host_prot = prot | (getProtection(host_start) & ~PROT_CUSTOM);
+-        int ret = mprotect((void*)host_start, box64_pagesize, host_prot);
++        int ret = mprotect((void*)host_start, box64_pagesize, BOX64_HOST_MPROT(host_prot));
+         if(ret) return -1;
+         updateProtection(host_start, box64_pagesize, host_prot);
+         host_start += box64_pagesize;
+@@ -4101,7 +4135,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+     if(end != host_end) {
+         host_end -= box64_pagesize;
+         int host_prot = prot | (getProtection(host_end) & ~PROT_CUSTOM);
+-        int ret = mprotect((void*)host_end, box64_pagesize, host_prot);
++        int ret = mprotect((void*)host_end, box64_pagesize, BOX64_HOST_MPROT(host_prot));
+         if(ret) return -1;
+         updateProtection(host_end, box64_pagesize, host_prot);
+     }
+@@ -4109,7 +4143,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+         setGuestProtection(start, end - start, prot, 0);
+         return 0;
+     }
+-    int ret = mprotect((void*)host_start, host_end - host_start, prot);
++    int ret = mprotect((void*)host_start, host_end - host_start, BOX64_HOST_MPROT(prot));
+     if(!ret) {
+         updateProtection(host_start, host_end - host_start, prot);
+         setGuestProtection(start, end - start, prot, 0);

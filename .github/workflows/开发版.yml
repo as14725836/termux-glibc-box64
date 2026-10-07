@@ -11,6 +11,8 @@ permissions:
 env:
   SRC_REPO: https://github.com/ptitSeb/box64
   LAST_DEV_COMMIT_FILE: last_dev_box64_commit.txt
+  # Android W^X (mprotect) 修复：1 = 补丁必须成功应用，否则终止构建；0 = 应用失败也继续（应急开关）
+  ANDROID_WX_PATCH_STRICT: "1"
   FEX_LLVMMINGW_TAG: "20250920"
   FEX_LLVMMINGW_NAME: "llvm-mingw-20250920-ucrt-ubuntu-22.04-aarch64"
 
@@ -169,6 +171,34 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
 
+          # ===== android-wx.patch：Android W^X (mprotect) 修复（默认启用）=====
+          # 背景：targetSdkVersion >= 29 时，untrusted_app 域拒绝在 app 私有存储
+          #       支撑的内存上做 mprotect(PROT_EXEC)，让 guest 的 mprotect() 直接失败。
+          # 做法：只剥离传给“宿主 mprotect()”的 PROT_EXEC；box64 自身的保护记账
+          #       （updateProtection / setGuestProtection）保持原样，所以 guest 可见的
+          #       页属性、SMC / 写保护逻辑都不受影响（box64 从不原生执行 guest 页）。
+          # 关闭：运行时 export BOX64_ANDROID_WX=0
+          WX_PATCH="$GITHUB_WORKSPACE/android-wx.patch"
+          if [ ! -f "$WX_PATCH" ]; then
+            echo "❌ 找不到 $WX_PATCH"
+            [ "${ANDROID_WX_PATCH_STRICT}" = "0" ] || exit 1
+          elif patch -p1 --dry-run < "$WX_PATCH" >/dev/null 2>&1; then
+            apply_patch "$WX_PATCH"
+          else
+            echo "⚠️ android-wx.patch 与当前上游不兼容（my_mprotect 上下文已变）"
+            if [ "${ANDROID_WX_PATCH_STRICT}" = "0" ]; then
+              echo "⚠️ ANDROID_WX_PATCH_STRICT=0，跳过该补丁继续构建"
+            else
+              echo "❌ 终止构建：开发版不允许静默失去 W^X 修复"
+              exit 1
+            fi
+          fi
+
+          if grep -q 'BOX64_HOST_MPROT' src/wrapped/wrappedlibc.c; then
+            WX_N=$(grep -c 'BOX64_HOST_MPROT' src/wrapped/wrappedlibc.c)
+            echo "✅ android-wx 已生效：宿主 mprotect 已剥离 PROT_EXEC（文件内 ${WX_N} 处引用 = 2 处宏定义 + 5 个调用点）"
+          fi
+
           python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
 
           mkdir -p build && cd build
@@ -267,13 +297,21 @@ jobs:
             -DSD8G2=ON
             -DARM64EC=ON
             ```
-
             ### 🔧 已应用补丁
             - `compilefix.patch`
             - `jmpbuf.patch`
             - `opt.patch`
             - `termux.patch`
+            - `android-wx.patch`（Android W^X / mprotect 修复，**默认启用**）
             - **dfnone 修复**：编译期修复（不新增环境变量）
+
+            ### 🅰️ Android W^X (mprotect) 修复
+            - **症状**：`targetSdkVersion >= 29` 时，`untrusted_app` SELinux 域拒绝在 app 私有存储支撑的内存上做 `mprotect(PROT_EXEC)`，依赖该调用的程序（Wine / 加壳游戏 / 自带加载器的引擎）启动或加载阶段直接失败
+            - **做法**：只剥离**传给宿主 `mprotect()`** 的 `PROT_EXEC`。box64 从不原生执行 guest 页（全部 JIT 到自己的 `MAP_ANONYMOUS` 代码缓存），所以宿主侧不需要该位；box64 自身的保护记账与 guest 可见页属性**保持不变**
+            - **覆盖范围**：`my_mprotect()` 内全部 5 处宿主调用（4K 宿主页路径 1 处 + 16K 宿主页路径 4 处）
+            - **关闭方式**：`export BOX64_ANDROID_WX=0`（临时回到上游行为）
+            - **若出现异常**：先试 `BOX64_ANDROID_WX=0` 对比；ARM64EC / WOW64 模式属未充分验证场景
+
 
             ### 📥 安装方法
             ```bash
