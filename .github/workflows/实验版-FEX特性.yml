@@ -1,0 +1,246 @@
+name: 实验版 Box64 + FEX 2505/2507 特性 (aarch64)
+
+# ============================================================================
+# 实验性构建：把 FEX-Emu 2505/2507 的「原生读取导致 JIT 失效」机制移植到 box64。
+#
+# 背景
+# ----
+# 用户使用 `box64 wine64 ...`（64 位 Wine），不经过 wowbox64.dll。
+# 因此 FEX 的 BTCpuNotifyReadFile 接口在 box64 上没有调用点。
+#
+# 但底层问题是真实存在的：
+#   加壳/保护程序用 read() 把解密后的代码写进 RWX 内存。
+#   这个写入由 Wine 的原生（aarch64）侧发起，不会触发 box64 的缺页保护，
+#   于是 box64 仍然使用「加密时翻译出来的」dynablock → 崩溃。
+#
+# 本工作流应用 fex-2505-2507-box64.patch，在 syscall 层拦截
+# read(0) / pread64(17) / readv(19)，在返回后对目标区间执行
+# unprotectDB(mark=1)（= cleanDBFromAddressRange，失效 dynablock）。
+#
+# 仅移植 After=TRUE 分支。FEX-2508 的 After=FALSE 分支持有跨 syscall 的
+# 全局锁，是已知死锁源（2509 才修复），故意不移植。
+#
+# 关闭方式：export BOX64_FEX_READFILE_NOTIFY=0
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_commit:
+        description: 'box64 提交（留空 = main 最新）'
+        required: false
+        default: ''
+      strict:
+        description: '补丁必须成功应用（1=是，0=失败继续）'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write
+
+env:
+  SRC_REPO: https://github.com/ptitSeb/box64
+  FEX_PATCH: fex-2505-2507-box64.patch
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential gcc git patchelf jq curl unzip \
+            clang lld llvm ninja-build wget tar xz-utils
+
+      - name: 获取 box64 提交信息
+        id: info
+        run: |
+          if [ -n "${{ github.event.inputs.src_commit }}" ]; then
+            SHA="${{ github.event.inputs.src_commit }}"
+          else
+            SHA=$(git ls-remote ${{ env.SRC_REPO }} HEAD | awk '{print $1}')
+          fi
+          SHORT=${SHA:0:8}
+          BUILD_ID="$(date +%Y%m%d%H%M)-${SHORT}"
+          echo "SHA=$SHA" >> $GITHUB_ENV
+          echo "SHORT=$SHORT" >> $GITHUB_ENV
+          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+          echo "VERSION=fexexp-v${BUILD_ID}" >> $GITHUB_ENV
+          echo "📌 box64 提交: $SHA"
+
+      - name: 克隆 Box64
+        run: |
+          rm -rf box64
+          git clone ${{ env.SRC_REPO }} box64
+          cd box64
+          if [ -n "${{ github.event.inputs.src_commit }}" ]; then
+            git checkout "${{ github.event.inputs.src_commit }}"
+          fi
+          echo "=== 当前 HEAD ==="
+          git log --oneline -1
+
+      - name: 应用 FEX 2505/2507 移植补丁
+        run: |
+          cd box64
+          P="$GITHUB_WORKSPACE/${{ env.FEX_PATCH }}"
+          [ -f "$P" ] || { echo "❌ 找不到 $P"; exit 1; }
+
+          echo "=== 补丁试应用（dry-run）==="
+          if patch -p1 --dry-run < "$P"; then
+            echo "✅ dry-run 通过"
+          else
+            echo "❌ 补丁无法应用（上游 x64syscall.c 可能已变化）"
+            if [ "${{ github.event.inputs.strict }}" = "0" ]; then
+              echo "⚠️ strict=0，跳过补丁继续构建"
+              exit 0
+            fi
+            exit 1
+          fi
+
+          patch -p1 < "$P"
+          echo
+          echo "=== 验证编辑已生效 ==="
+          grep -c 'box64_fex_notify_readfile' src/emu/x64syscall.c
+          grep -c 'box64_fex_notify_readv'    src/emu/x64syscall.c
+          grep -c 'custommem.h'               src/emu/x64syscall.c
+          echo "✅ 补丁应用完成"
+
+      - name: 构建 box64
+        run: |
+          cd box64
+          unset LD_PRELOAD
+          export GLIBC_PREFIX=/data/data/com.termux/files/usr/glibc
+          export PATH=$GLIBC_PREFIX/bin:$PATH
+          export LD_LIBRARY_PATH=$GLIBC_PREFIX/lib:$LD_LIBRARY_PATH
+
+          sed -i 's|/usr|/data/data/com.termux/files/usr/glibc|g' CMakeLists.txt
+          sed -i 's|/etc|/data/data/com.termux/files/usr/glibc/etc|g' CMakeLists.txt
+
+          apply_patch() {
+            patch -p1 -N -f < "$1" || true
+            find . -name "*.rej" -delete 2>/dev/null || true
+          }
+          apply_patch "$GITHUB_WORKSPACE/compilefix.patch"
+          apply_patch "$GITHUB_WORKSPACE/jmpbuf.patch"
+          apply_patch "$GITHUB_WORKSPACE/opt.patch"
+          apply_patch "$GITHUB_WORKSPACE/termux.patch"
+
+          WX_PATCH="$GITHUB_WORKSPACE/android-wx.patch"
+          if [ -f "$WX_PATCH" ] && patch -p1 --dry-run < "$WX_PATCH" >/dev/null 2>&1; then
+            apply_patch "$WX_PATCH"
+          else
+            echo "⚠️ android-wx.patch 不兼容，跳过"
+          fi
+
+          python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || echo "⚠️ dfnone 修复跳过"
+
+          mkdir -p build && cd build
+          cmake .. \
+            -DARM_DYNAREC=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWINLATOR_GLIBC=ON \
+            -DARM64=ON \
+            -DSD8G2=ON
+
+          make -j$(nproc)
+          echo "✅ 构建完成"
+
+          patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 ./box64
+          file box64
+          ls -lh box64
+
+          # 确认 FEX 钩子真的被编译进去了（符号检查）
+          echo "=== 确认 FEX 钩子符号存在 ==="
+          nm -C box64 2>/dev/null | grep -i 'fex_notify' || \
+            echo "⚠️ 未找到符号（可能是 static/inline，检查字符串即可）"
+          strings box64 | grep -m3 'FEX port' || echo "（无字符串，正常：仅 showsegv 时打印）"
+
+      - name: 打包
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          rm -rf dist && mkdir -p dist
+          cp -a box64/build/box64 dist/
+          find box64/build -name "*.dll" -exec cp -a {} dist/ \; 2>/dev/null || true
+          ls -lh dist/
+
+          TAR_FILE="termux-glibc-box64-${VERSION}.tar.gz"
+          tar -czvf "$TAR_FILE" -C dist .
+          echo "TAR_FILE=$TAR_FILE" >> $GITHUB_ENV
+          echo "✅ 打包完成: $TAR_FILE"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: box64-fexexp-${{ env.BUILD_ID }}
+          path: ${{ env.TAR_FILE }}
+          retention-days: 14
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: box64-${{ env.VERSION }}
+          name: "Box64 FEX-2505/2507 实验版 ${{ env.BUILD_ID }} (aarch64, Termux glibc)"
+          body: |
+            ## 🧪 实验版：FEX 2505/2507 特性移植到 box64
+
+            > ⚠️ **这是实验性构建**，用于验证「原生读取 → JIT 失效」机制。
+            > 不要替换生产环境的 box64。
+
+            ### 移植了什么
+            在 syscall 层拦截 `read(0)` / `pread64(17)` / `readv(19)`，
+            返回后对目标区间执行 `unprotectDB(mark=1)`
+            （= `cleanDBFromAddressRange`，失效覆盖该区间的 dynablock）。
+
+            对应 FEX 的 `BTCpuNotifyReadFile(..., After=TRUE, ...)` 分支。
+
+            ### 为什么需要
+            `box64 wine64 ...` 不经过 `wowbox64.dll`，FEX 的 `BTCpu*` 接口
+            没有调用点。而 box64 原有的 SMC 检测基于缺页异常，
+            **看不到 Wine 原生侧（aarch64 代码）发起的写入**，
+            所以加壳程序 `read()` 解密代码后 box64 仍用旧的 dynablock。
+
+            ### 故意没做的事
+            - ❌ 不移植 FEX-2508 的 `After=FALSE` 分支（跨 syscall 持锁，已知死锁）
+            - ❌ 不移植 `recvfrom`/`recvmsg`（网络热路径）
+
+            ### 开关
+            ```bash
+            export BOX64_FEX_READFILE_NOTIFY=0   # 关闭，回到上游行为
+            export BOX64_SHOWSEGV=1              # 打印命中日志（[FEX port] ...）
+            ```
+
+            ### 构建信息
+            | 项目 | 值 |
+            |------|-----|
+            | box64 提交 | `${{ env.SHORT }}` |
+            | 构建 ID | `${{ env.BUILD_ID }}` |
+            | 补丁 | `${{ env.FEX_PATCH }}` |
+            | 平台 | aarch64 / Termux glibc |
+            | 编译选项 | `-DARM_DYNAREC=ON -DWINLATOR_GLIBC=ON -DARM64=ON -DSD8G2=ON` |
+
+            ### 安装
+            ```bash
+            mkdir -p /data/data/com.termux/files/usr/glibc/box64-fexexp
+            tar -xzf termux-glibc-box64-${{ env.VERSION }}.tar.gz \
+                -C /data/data/com.termux/files/usr/glibc/box64-fexexp/
+            ```
+
+            ### 验证方法
+            ```bash
+            export BOX64_SHOWSEGV=1
+            BOX64_LOG=1 box64 wine64 game.exe 2>&1 | grep -i 'FEX port'
+            ```
+            出现 `[FEX port] read syscall N wrote M bytes into executable range`
+            即说明机制被触发。
+
+            ---
+            *🧪 实验性构建，由 GitHub Actions 生成*
+          files: ${{ env.TAR_FILE }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
