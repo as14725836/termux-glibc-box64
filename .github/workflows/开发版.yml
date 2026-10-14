@@ -35,6 +35,17 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
+      - name: 恢复上次构建记录
+        id: restore_last
+        # 下载上一次构建上传的 commit 记录，用于判断上游是否有「ARM 相关」新改动。
+        # 注意：artifact 名是固定的（每次覆盖），首次运行或已被清理时下载会失败，
+        # 这里用 continue-on-error 容错，并在后续步骤里回退查最近一次 Release。
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: last-dev-box64-commit
+          path: .
+
       - name: 安装依赖
         run: |
           sudo apt-get update
@@ -132,9 +143,36 @@ jobs:
       - name: 获取上次构建信息
         id: get_last
         run: |
+          LAST_BUILD=""
+
+          # 优先用上次构建上传的记录文件
           if [ -f "${{ env.LAST_DEV_COMMIT_FILE }}" ]; then
-            LAST_BUILD=$(cat "${{ env.LAST_DEV_COMMIT_FILE }}")
-            echo "👉 上次构建提交: ${LAST_BUILD:0:8}"
+            LAST_BUILD=$(tr -d '\r\n[:space:]' < "${{ env.LAST_DEV_COMMIT_FILE }}")
+            echo "📄 从构建记录文件读到上次提交: ${LAST_BUILD:0:8}"
+          fi
+
+          # 回退：从最近一次 Release 的 tag 里解析 box64 提交短 sha
+          # tag 形如 box64-v0.4.5-202610140331-4437c9b8，末段是 8 位短 sha
+          if [ -z "$LAST_BUILD" ]; then
+            echo "ℹ️ 无构建记录文件，尝试从最近 Release tag 推断"
+            REL_JSON=$(mktemp)
+            if curl -fsSL -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/releases?per_page=10" \
+                 -o "$REL_JSON" 2>/dev/null; then
+              # 只认 box64-v<数字...> 形式的 tag，跳过旧的 box64-dev-* 
+              LAST_BUILD=$(jq -r '
+                [ .[]?.tag_name
+                  | select(test("^box64-v[0-9]+\\.[0-9]+\\.[0-9]+-"))
+                  | capture("-(?<sha>[0-9a-f]{7,40})$").sha
+                ] | first // empty' "$REL_JSON" 2>/dev/null || true)
+              if [ -n "$LAST_BUILD" ]; then
+                echo "🏷️ 从 Release tag 解析到上次提交: ${LAST_BUILD:0:8}"
+              fi
+            fi
+            rm -f "$REL_JSON"
+          fi
+
+          if [ -n "$LAST_BUILD" ]; then
             echo "last_build=$LAST_BUILD" >> $GITHUB_OUTPUT
           else
             echo "👉 首次构建，无历史记录"
