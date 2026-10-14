@@ -75,9 +75,34 @@ jobs:
           COMMIT_MESSAGE=$(jq -r '.commit.message' commit.json | head -n1)
 
           CURRENT_DATE=$(date +%Y%m%d%H%M)
-          VERSION="dev-${CURRENT_DATE}-${LATEST_COMMIT_SHORT}"
           BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
 
+          # ===== 版本号：读 box64 源码的 box64version.h（与上游 release.yml 同源）=====
+          # 包名带真实语义版本（如 v0.4.5），而不是时间戳。
+          # 用 GitHub API 读，避免为了一个头文件提前 clone。
+          BOX64_VERSION=""
+          VH_JSON=$(mktemp)
+          if curl -fsSL "https://api.github.com/repos/ptitSeb/box64/contents/src/box64version.h?ref=${LATEST_COMMIT_FULL}" -o "$VH_JSON"; then
+            VH_TEXT=$(jq -r '.content' "$VH_JSON" 2>/dev/null | base64 -d 2>/dev/null || true)
+            V_MAJOR=$(printf '%s\n' "$VH_TEXT" | grep -m1 'BOX64_MAJOR'    | awk '{print $3}')
+            V_MINOR=$(printf '%s\n' "$VH_TEXT" | grep -m1 'BOX64_MINOR'    | awk '{print $3}')
+            V_REV=$(  printf '%s\n' "$VH_TEXT" | grep -m1 'BOX64_REVISION' | awk '{print $3}')
+            if [ -n "$V_MAJOR" ] && [ -n "$V_MINOR" ] && [ -n "$V_REV" ]; then
+              BOX64_VERSION="v${V_MAJOR}.${V_MINOR}.${V_REV}"
+            fi
+          fi
+          rm -f "$VH_JSON"
+          if [ -z "$BOX64_VERSION" ]; then
+            echo "⚠️ 未能从 box64version.h 读到版本号，回退 v0.0.0（构建继续，包名版本号不可信）"
+            BOX64_VERSION="v0.0.0"
+          fi
+
+          # 同版本可能多次构建，用 时间戳+短commit 保证唯一（tag 不冲突）
+          BUILD_ID="${CURRENT_DATE:-$(date +%Y%m%d%H%M)}-${LATEST_COMMIT_SHORT}"
+          VERSION="${BOX64_VERSION}-${BUILD_ID}"
+
+          echo "BOX64_VERSION=$BOX64_VERSION" >> $GITHUB_ENV
+          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "LATEST_COMMIT=$LATEST_COMMIT_FULL" >> $GITHUB_ENV
           echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> $GITHUB_ENV
@@ -87,7 +112,8 @@ jobs:
           echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
 
           echo "📊 构建信息:"
-          echo "   版本: $VERSION"
+          echo "   box64 版本: $BOX64_VERSION"
+          echo "   完整版本: $VERSION"
           echo "   提交: $LATEST_COMMIT_SHORT"
           echo "   作者: $COMMIT_AUTHOR"
           echo "   日期: $COMMIT_DATE"
@@ -238,7 +264,7 @@ jobs:
           echo "===== dist 内容 ====="
           ls -lh dist/
 
-          TAR_FILE="termux-glibc-box64-dev-${VERSION}.tar.gz"
+          TAR_FILE="termux-glibc-box64-${VERSION}.tar.gz"
           tar -czvf "$TAR_FILE" -C dist .
 
           echo "===== 包内文件 ====="
@@ -253,7 +279,7 @@ jobs:
         if: steps.check_build.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: box64-dev-${{ env.VERSION }}
+          name: box64-${{ env.VERSION }}
           path: ${{ env.TAR_FILE }}
           retention-days: 7
 
@@ -269,15 +295,17 @@ jobs:
         if: steps.check_build.outputs.skip_build == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: box64-dev-${{ env.VERSION }}
-          name: "Box64 开发版 ${{ env.VERSION }} (aarch64, Termux glibc, ARM64EC)"
+          tag_name: box64-${{ env.VERSION }}
+          name: "Box64 ${{ env.VERSION }} (aarch64, Termux glibc, ARM64EC, 自动构建)"
           body: |
-            ## 🚀 Box64 自动构建 - 开发版
+            ## 🚀 Box64 自动构建 - `${{ env.BOX64_VERSION }}`
 
             ### 📅 构建信息
             | 项目 | 信息 |
             |------|------|
-            | **版本** | `${{ env.VERSION }}` |
+            | **box64 版本** | `${{ env.BOX64_VERSION }}` |
+            | **完整版本** | `${{ env.VERSION }}` |
+            | **构建 ID** | `${{ env.BUILD_ID }}` |
             | **Commit** | `${{ env.LATEST_COMMIT_SHORT }}` |
             | **作者** | `${{ env.COMMIT_AUTHOR }}` |
             | **提交日期** | `${{ env.COMMIT_DATE }}` |
@@ -315,7 +343,7 @@ jobs:
             ### 📥 安装方法
             ```bash
             mkdir -p /data/data/com.termux/files/usr/glibc/box64
-            tar -xzf termux-glibc-box64-dev-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/box64/
+            tar -xzf termux-glibc-box64-${{ env.VERSION }}.tar.gz -C /data/data/com.termux/files/usr/glibc/box64/
 
             export PATH=/data/data/com.termux/files/usr/glibc/box64:$PATH
             export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/glibc/lib:$LD_LIBRARY_PATH
