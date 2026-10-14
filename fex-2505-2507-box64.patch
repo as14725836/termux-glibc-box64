@@ -1,5 +1,5 @@
 --- a/src/emu/x64syscall.c	2026-10-13 17:01:55.000000000 +0000
-+++ b/src/emu/x64syscall.c	2026-10-14 04:55:02.701984957 +0000
++++ b/src/emu/x64syscall.c	2026-10-14 05:16:24.397984468 +0000
 @@ -44,6 +44,9 @@
  #include "x64int_private.h"
  #include "syscall_user_dispatch.h"
@@ -10,7 +10,7 @@
  
  typedef struct x64_sigaction_s x64_sigaction_t;
  typedef struct x64_stack_s x64_stack_t;
-@@ -545,6 +548,156 @@
+@@ -545,6 +548,205 @@
      }
      return x64Syscall_linux(emu);
  }
@@ -29,38 +29,42 @@
 + *             InvalidationTracker->InvalidateAlignedInterval(addr, size, false);
 + *     }
 + *
-+ * Wine calls it in dlls/wow64/file.c around every NtReadFile:
++ * Wine calls it around every NtReadFile (dlls/wow64/file.c):
 + *
 + *     if (pBTCpuNotifyReadFile) pBTCpuNotifyReadFile(handle,buffer,len,FALSE,0);
 + *     status = NtReadFile(...);
 + *     if (pBTCpuNotifyReadFile) pBTCpuNotifyReadFile(handle,buffer,len,TRUE,status);
 + *
-+ * Why box64 cannot just export BTCpuNotifyReadFile
-+ * ------------------------------------------------
++ * Why exporting BTCpuNotifyReadFile is not enough here
++ * ---------------------------------------------------
 + * This build runs 64-bit Wine (`box64 wine64 ...`), which never loads
-+ * wowbox64.dll.  There is no CPU-DLL layer, so the BTCpu* contract above is
-+ * never exercised and exporting the symbol would be dead code.
++ * wowbox64.dll.  There is no CPU-DLL layer, so the BTCpu* contract is never
++ * exercised and the export would be dead code.
 + *
 + * box64's only SMC detection is fault based: signals.c traps a write to a
-+ * protected code page, then unprotectDB(mark=1) -> cleanDBFromAddressRange()
-+ * dirties the affected dynablocks.  That works for writes performed by guest
-+ * instructions, but a write issued by *native* code - Wine's unix side - never
-+ * faults and is therefore invisible.
++ * write-protected code page, then unprotectDB(mark=1) ->
++ * cleanDBFromAddressRange() dirties the affected dynablocks.  That covers
++ * writes issued by guest instructions, but a write issued by *native* code -
++ * Wine's unix side - never faults and stays invisible.
 + *
-+ * Packed/protected executables routinely decrypt code this way:
++ * Packed/protected executables exploit exactly that:
 + *
-+ *     read(fd, rwx_buffer, size);   // native write, no SIGSEGV is generated
-+ *     jump into rwx_buffer;         // box64 still has dynablocks translated
-+ *                                   // from the *encrypted* bytes -> stale code
-+ *
-+ * The result is a crash or a protection trip, exactly the failure FEX fixed
-+ * with BTCpuNotifyReadFile.
++ *     buf = VirtualAlloc(size, PAGE_EXECUTE_READWRITE);
++ *     read(fd, buf, size);        // native write: no SIGSEGV is generated
++ *     jump into buf;              // box64 still holds dynablocks translated
++ *                                 // from the *encrypted* bytes -> stale code
 + *
 + * What this hook does
 + * -------------------
-+ * Intercept the read family on the syscall path (the only point where box64
-+ * sees a Wine process issue a real kernel read) and invalidate the destination
-+ * range afterwards - the equivalent of FEX's After=TRUE branch.
++ * Intercept the data-ingest syscalls on the syscall path (the only place where
++ * box64 sees a Wine process issue a real kernel read) and invalidate the
++ * destination afterwards - the equivalent of FEX's After=TRUE branch.
++ *
++ * Covered: read(0), pread64(17), readv(19), recvfrom(45), recvmsg(47).
++ * These are the paths a packer or a loader realistically uses to drop code into
++ * a buffer.  Not covered: mmap (box64 already routes it through its own
++ * mapping code and knows about every page it maps), and the *at()/mmsg
++ * variants, which no packer has been observed to use.
 + *
 + * Only the After=TRUE half is ported.  FEX-2508 added an After=FALSE half that
 + * holds a global mutex across the whole syscall; that is a known deadlock
@@ -68,6 +72,7 @@
 + * NOT reproduced here.  This implements 2505/2507 behaviour.
 + *
 + * Toggle: BOX64_FEX_READFILE_NOTIFY=0 restores upstream behaviour.
++ * Log:    BOX64_SHOWSEGV=1 prints every invalidation.
 + */
 +static int box64_fex_readfile_notify(void)
 +{
@@ -80,20 +85,26 @@
 +    return cached;
 +}
 +
-+/* read(2), pread64(17), readv(19).  Network reads (recvfrom/recvmsg) are
-+ * intentionally excluded: they are hot, and packed loaders overwhelmingly use
-+ * plain file reads. */
++/* Syscall numbers are the x86_64 ones, i.e. the guest's view. */
 +static int box64_fex_read_syscall(uint32_t s)
 +{
-+    return (s ==   0)    /* read    */
-+        || (s ==  17)    /* pread64 */
-+        || (s ==  19);   /* readv   */
++    return (s ==   0)    /* read     */
++        || (s ==  17)    /* pread64  */
++        || (s ==  19)    /* readv    */
++        || (s ==  45)    /* recvfrom */
++        || (s ==  47);   /* recvmsg  */
 +}
 +
 +#ifdef DYNAREC
-+/* Only ranges that can actually hold code matter.  A read into ordinary
++/* Only ranges that can hold code are worth touching.  A read into ordinary
 + * anonymous RW memory cannot leave a stale dynablock behind, and skipping it
-+ * keeps the common case (every normal file load) at zero cost. */
++ * keeps the common case (every normal file load) free of overhead.
++ *
++ * Note this is a *fast path filter*, not a correctness gate: a page that is
++ * not currently executable cannot have been translated either, so nothing can
++ * be stale in it.  Code that first reads into RW memory and then flips the
++ * page to RX is handled by box64's own mprotect wrapper (updateProtection()),
++ * which cleans the range when PROT_EXEC changes. */
 +static int box64_fex_range_is_exec(uintptr_t addr, size_t size)
 +{
 +    if (!addr || !size || !box64_pagesize) return 0;
@@ -104,6 +115,18 @@
 +    }
 +    return 0;
 +}
++
++#define BOX64_FEX_INVALIDATE(ptr, len)                                        \
++    do {                                                                      \
++        if (box64_fex_range_is_exec((uintptr_t)(ptr), (len))) {               \
++            unprotectDB((uintptr_t)(ptr), (size_t)(len), 1);                  \
++            if (BOX64ENV(showsegv))                                           \
++                printf_log(LOG_INFO,                                          \
++                    "[FEX port] read %p-%p <- %zu bytes, dynablocks invalidated\n", \
++                    (void*)(ptr), (void*)((uintptr_t)(ptr) + (len)),          \
++                    (size_t)(len));                                           \
++        }                                                                     \
++    } while (0)
 +#endif
 +
 +/* Called from the read wrappers in x64Syscall_linux() right after the real
@@ -124,17 +147,11 @@
 +    if (len && n > len) n = len;
 +    if (!n) return;
 +
-+    if (!box64_fex_range_is_exec(buf, n)) return;
-+
 +    /* mark=1 -> cleanDBFromAddressRange(): mark every dynablock overlapping
 +     * the range as dirty so it is re-translated on next entry.  box64's
-+     * equivalent of InvalidateAlignedInterval(). */
-+    unprotectDB(buf, n, 1);
-+    if (BOX64ENV(showsegv))
-+        printf_log(LOG_INFO,
-+            "[FEX port] read syscall %u wrote %zu bytes into executable range "
-+            "%p-%p -> dynablocks invalidated\n",
-+            s, n, (void*)buf, (void*)(buf + n));
++     * equivalent of InvalidateAlignedInterval(), and the same call box64's
++     * own wowbox64.c makes from BTCpuNotifyMemoryDirty(). */
++    BOX64_FEX_INVALIDATE(buf, n);
 +#else
 +    (void)s; (void)buf; (void)len; (void)ret;
 +#endif
@@ -150,30 +167,63 @@
 +    if (!box64_wine)                  return;
 +    if (ret <= 0)                     return;
 +    if (!iov || !iovcnt || iovcnt > 1024) return;
-+    /* struct iovec { void* iov_base; size_t iov_len; } - matches the x86_64
-+     * layout, so the guest array can be read directly. */
++    /* struct iovec { void* iov_base; size_t iov_len; } - identical layout on
++     * x86_64 and aarch64, so the guest array can be read directly. */
 +    struct fex_iovec_s { void* base; size_t len; }* v = (void*)iov;
 +    size_t left = (size_t)ret;
 +    for (size_t i = 0; i < iovcnt && left; ++i) {
 +        size_t n = v[i].len;
 +        if (n > left) n = left;
-+        if (n && box64_fex_range_is_exec((uintptr_t)v[i].base, n))
-+            unprotectDB((uintptr_t)v[i].base, n, 1);
++        if (n) BOX64_FEX_INVALIDATE(v[i].base, n);
 +        left -= n;
 +    }
 +}
++
++/* recvmsg(47): the received payload goes into msg_iov, a plain iovec array
++ * referenced by the msghdr.  On x86_64 msghdr is:
++ *   void* msg_name; socklen_t msg_namelen; struct iovec* msg_iov;
++ *   size_t msg_iovlen; void* msg_control; size_t msg_controllen; int msg_flags;
++ * so msg_iov sits at offset 16 and msg_iovlen at offset 24 (both 8-byte on
++ * x86_64).  Only min(ret, total) bytes were written, in iovec order. */
++void box64_fex_notify_recvmsg(void* msg, ssize_t ret)
++{
++    if (!box64_fex_readfile_notify()) return;
++    if (!box64_wine)                  return;
++    if (ret <= 0 || !msg)             return;
++    void**  m      = (void**)msg;
++    void*   iov    = m[2];              /* msg_iov    */
++    size_t  iovcnt = (size_t)m[3];      /* msg_iovlen */
++    if (!iov || !iovcnt || iovcnt > 1024) return;
++    struct fex_iovec_s { void* base; size_t len; }* v = (void*)iov;
++    size_t left = (size_t)ret;
++    for (size_t i = 0; i < iovcnt && left; ++i) {
++        size_t n = v[i].len;
++        if (n > left) n = left;
++        if (n) BOX64_FEX_INVALIDATE(v[i].base, n);
++        left -= n;
++    }
++}
++#else  /* !DYNAREC */
++/* The call sites in x64Syscall_linux() are unconditional; without the
++ * dynarec there is nothing to invalidate, so provide no-op stubs to keep
++ * the build warning-free. */
++void box64_fex_notify_readv(void* iov, size_t iovcnt, ssize_t ret)
++{ (void)iov; (void)iovcnt; (void)ret; }
++void box64_fex_notify_recvmsg(void* msg, ssize_t ret)
++{ (void)msg; (void)ret; }
 +#endif
 +
  void EXPORT x64Syscall_linux(x64emu_t *emu)
  {
      RESET_FLAGS(emu);
-@@ -590,6 +743,17 @@
+@@ -590,13 +792,45 @@
                  if(s==42) {if(log) snprintf(buff2, 127, " [sys_connect(%d, %p[type=%d], %d)]", R_EDI, (void*)R_RSI, *(unsigned short*)R_RSI, R_EDX);};
                  if(s==258) {if(log) snprintf(buff2, 127, " [sys_mkdirat(%d, %s, 0x%x]", R_EDI, (char*)R_RSI, R_EDX);};
                  S_RAX = syscall(sc, R_RDI, R_RSI, R_RDX);
-+                /* [FEX port] readv can drop file bytes straight into a code
-+                 * page, exactly like read() does.  readv is wrapper index 19
-+                 * with 3 parameters. */
++                /* [FEX port] readv(19) scatters file bytes straight into a
++                 * code page exactly like read() does.  recvmsg(47) can drop
++                 * network-supplied bytes into one too.  Both are wrapper
++                 * index N with 3 parameters. */
 +                if(s==19) {
 +                    if(S_EAX==-1 && errno>0) S_RAX = -errno;
 +                    box64_fex_notify_readv((void*)R_RSI, (size_t)R_RDX, (ssize_t)S_RAX);
@@ -182,10 +232,38 @@
 +                        printf_log_prefix(0, LOG_NONE, "=> %s\n", buffret);
 +                    return;
 +                }
++                if(s==47) {
++                    if(S_EAX==-1 && errno>0) S_RAX = -errno;
++                    box64_fex_notify_recvmsg((void*)R_RSI, (ssize_t)S_RAX);
++                    if(log) snprintf(buffret, 127, "0x%x%s", R_EAX, buff2);
++                    if(log && !BOX64ENV(rolling_log))
++                        printf_log_prefix(0, LOG_NONE, "=> %s\n", buffret);
++                    return;
++                }
                  break;
              case 4: S_RAX = syscall(sc, R_RDI, R_RSI, R_RDX, R_R10); break;
              case 5:
-@@ -610,10 +774,17 @@
+                 if(s==165) {if(log) snprintf(buff2, 127, " [sys_mount(%s, %s, %s, 0x%lx, %s]", (char*)R_RDI, (char*)R_RSI, (char*)R_RDX, R_R10, R_R8?(char*)R_R8:"(nil)");};
+                 S_RAX = syscall(sc, R_RDI, R_RSI, R_RDX, R_R10, R_R8);
+                 break;
+-            case 6: S_RAX = syscall(sc, R_RDI, R_RSI, R_RDX, R_R10, R_R8, R_R9); break;
++            case 6:
++                S_RAX = syscall(sc, R_RDI, R_RSI, R_RDX, R_R10, R_R8, R_R9);
++                /* [FEX port] recvfrom(45) = (fd, buf, len, flags, addr, alen).
++                 * R_RSI is the destination buffer, R_RDX the length. */
++                if(s==45) {
++                    if(S_EAX==-1 && errno>0) S_RAX = -errno;
++                    box64_fex_notify_readfile(45, R_RSI, (size_t)R_RDX, (ssize_t)S_RAX);
++                    if(log) snprintf(buffret, 127, "0x%x%s", R_EAX, buff2);
++                    if(log && !BOX64ENV(rolling_log))
++                        printf_log_prefix(0, LOG_NONE, "=> %s\n", buffret);
++                    return;
++                }
++                break;
+             default:
+                 printf_log(LOG_NONE, "ERROR, Unimplemented syscall wrapper (%d, %d)\n", s, syscallwrap[s].nbpars);
+                 emu->quit = 1;
+@@ -610,10 +844,17 @@
      }
      switch (s) {
          case 0:  // sys_read
