@@ -185,10 +185,19 @@ jobs:
           LAST_BUILD="${{ steps.get_last.outputs.last_build }}"
           CURRENT_COMMIT="${{ env.LATEST_COMMIT }}"
 
-          if [ "$CURRENT_COMMIT" = "$LAST_BUILD" ]; then
-            echo "✅ 无新提交，跳过构建"
-            echo "skip_build=true" >> $GITHUB_OUTPUT
-            exit 0
+          # 注意：LAST_BUILD 可能是 8 位短 sha（从 Release tag 解析而来），
+          # 而 CURRENT_COMMIT 是 40 位完整 sha —— 不能直接字符串相等比较，
+          # 否则永远判为「有新提交」，跳过逻辑形同虚设。
+          # 统一按前缀匹配：CURRENT_COMMIT 以 LAST_BUILD 开头即视为同一个提交。
+          if [ -n "$LAST_BUILD" ] && [ "$LAST_BUILD" != "none" ]; then
+            case "$CURRENT_COMMIT" in
+              "$LAST_BUILD"*)
+                echo "✅ 无新提交（$LAST_BUILD 是当前 HEAD 的前缀），跳过构建"
+                echo "skip_build=true" >> $GITHUB_OUTPUT
+                echo "arm_reason=up-to-date" >> $GITHUB_OUTPUT
+                exit 0
+                ;;
+            esac
           fi
 
           # ============ 只在「ARM 相关」改动时才构建 ============
