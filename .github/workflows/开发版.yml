@@ -15,6 +15,17 @@ env:
   ANDROID_WX_PATCH_STRICT: "1"
   FEX_LLVMMINGW_TAG: "20250920"
   FEX_LLVMMINGW_NAME: "llvm-mingw-20250920-ucrt-ubuntu-22.04-aarch64"
+  # 只有「ARM 相关」的上游提交才触发自动构建，避免无关改动（如 RISC-V/LoongArch
+  # 后端、文档）也每 30 分钟构建一次。
+  #
+  # 判定方式（保守、不漏报）：从上次构建的提交到 HEAD 之间逐个检查提交所改的文件，
+  # 只要有任何文件 **不属于** 下列「其它架构专属」路径，就认为是 ARM 相关 → 构建。
+  # 宁可多构建几次，也不放过 ARM64 / ARM64EC / WOW64 / 通用代码 的真实修复。
+  #
+  # 被忽略的路径（正则，前缀匹配，用 | 分隔）：
+  IGNORE_PATHS: '^src/dynarec/(rv64|la64|ppc64le)/'
+  # 最多回溯检查多少个提交（防止上次构建太久远导致 API 调用过多）
+  MAX_COMMITS_SCAN: "60"
 
 jobs:
   build:
@@ -139,9 +150,98 @@ jobs:
           if [ "$CURRENT_COMMIT" = "$LAST_BUILD" ]; then
             echo "✅ 无新提交，跳过构建"
             echo "skip_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "🟢 检测到新提交，准备构建"
+            exit 0
+          fi
+
+          # ============ 只在「ARM 相关」改动时才构建 ============
+          # 逐个检查 last_build..HEAD 的提交；只要有一个提交改了
+          # 非「其它架构专属」路径的文件，就判定为 ARM 相关。
+          IGNORE_RE='${{ env.IGNORE_PATHS }}'
+          MAX_SCAN=${{ env.MAX_COMMITS_SCAN }}
+          API="https://api.github.com/repos/ptitSeb/box64"
+
+          # 首次构建（无历史记录）直接构建，无需比较区间
+          if [ "$LAST_BUILD" = "none" ] || [ -z "$LAST_BUILD" ]; then
+            echo "🟢 首次构建（无历史记录），直接构建"
             echo "skip_build=false" >> $GITHUB_OUTPUT
+            echo "arm_reason=first-build" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "🔍 检查 ${LAST_BUILD:0:8} .. ${CURRENT_COMMIT:0:8} 之间的改动..."
+
+          # 用 compare API 一次性拿到区间内的文件变化（优先，省调用）
+          CMP_JSON=$(mktemp)
+          FILES_TXT=$(mktemp)
+          ARM_FOUND=false
+          REASON=""
+
+          if curl -fsSL -H "Accept: application/vnd.github+json" \
+               "$API/compare/${LAST_BUILD}...${CURRENT_COMMIT}" -o "$CMP_JSON"; then
+            TOTAL_COMMITS=$(jq -r '.total_commits // 0' "$CMP_JSON" 2>/dev/null || echo 0)
+            # compare 的 files 上限 250 个；超过时 jq 拿不全，回退到逐提交扫描
+            FILE_COUNT=$(jq -r '.files | length' "$CMP_JSON" 2>/dev/null || echo 0)
+            jq -r '.files[]?.filename' "$CMP_JSON" > "$FILES_TXT" 2>/dev/null || true
+
+            if [ "$TOTAL_COMMITS" -gt 300 ]; then
+              echo "⚠️ 区间内有 $TOTAL_COMMITS 个提交（compare 上限 300），回退逐提交扫描"
+              : > "$FILES_TXT"
+            fi
+          fi
+
+          # 若 compare 没拿到文件（失败/超限），逐提交回退扫描
+          if [ ! -s "$FILES_TXT" ]; then
+            echo "ℹ️ compare 未返回文件列表，改为逐提交扫描（最多 $MAX_SCAN 个）"
+            SCAN=0
+            SHA="$CURRENT_COMMIT"
+            while [ "$SCAN" -lt "$MAX_SCAN" ] && [ "$SHA" != "$LAST_BUILD" ] && [ -n "$SHA" ]; do
+              CJ=$(mktemp)
+              if curl -fsSL -H "Accept: application/vnd.github+json" "$API/commits/$SHA" -o "$CJ"; then
+                jq -r '.files[]?.filename' "$CJ" >> "$FILES_TXT" 2>/dev/null || true
+                NEXT=$(jq -r '.parents[0].sha // empty' "$CJ" 2>/dev/null || true)
+                if [ -z "$NEXT" ]; then break; fi
+                SHA="$NEXT"
+              else
+                echo "⚠️ 读取提交 $SHA 失败，保守起见判为需要构建"
+                ARM_FOUND=true
+                REASON="api-error-fail-open"
+                break
+              fi
+              rm -f "$CJ"
+              SCAN=$((SCAN+1))
+            done
+            echo "   已扫描 $SCAN 个提交"
+          fi
+
+          if [ "$ARM_FOUND" != "true" ]; then
+            TOTAL_FILES=$(wc -l < "$FILES_TXT" 2>/dev/null | tr -d ' ' || echo 0)
+            echo "   涉及 $TOTAL_FILES 个文件改动"
+
+            # 过滤掉「其它架构专属」路径；只要还剩文件，就是 ARM 相关
+            ARM_RELEVANT=$(grep -Ev "$IGNORE_RE" "$FILES_TXT" | grep -v '^$' | sort -u || true)
+
+            if [ -n "$ARM_RELEVANT" ]; then
+              ARM_FOUND=true
+              REASON="arm-files"
+              echo "   ✅ 检测到 ARM 相关文件改动："
+              echo "$ARM_RELEVANT" | head -10 | sed 's/^/      /' || true
+              MORE=$(( $(echo "$ARM_RELEVANT" | wc -l | tr -d ' ') - 10 )) || MORE=0
+              if [ "$MORE" -gt 0 ]; then echo "      ... 还有 $MORE 个"; fi
+            else
+              echo "   ⏭️ 本次改动全部属于其它架构专属路径（被忽略），跳过构建"
+            fi
+          fi
+
+          rm -f "$CMP_JSON" "$FILES_TXT"
+
+          if [ "$ARM_FOUND" = "true" ]; then
+            echo "🟢 需要构建（原因: $REASON）"
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+            echo "arm_reason=$REASON" >> $GITHUB_OUTPUT
+          else
+            echo "✅ 无 ARM 相关改动，跳过构建"
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+            echo "arm_reason=none" >> $GITHUB_OUTPUT
           fi
 
       - name: 克隆 Box64 并构建
@@ -306,6 +406,7 @@ jobs:
             | **box64 版本** | `${{ env.BOX64_VERSION }}` |
             | **完整版本** | `${{ env.VERSION }}` |
             | **构建 ID** | `${{ env.BUILD_ID }}` |
+            | **触发原因** | `${{ steps.check_build.outputs.arm_reason }}`（ARM 相关改动） |
             | **Commit** | `${{ env.LATEST_COMMIT_SHORT }}` |
             | **作者** | `${{ env.COMMIT_AUTHOR }}` |
             | **提交日期** | `${{ env.COMMIT_DATE }}` |
