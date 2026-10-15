@@ -1,0 +1,83 @@
+diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
+index 10c0f34..a4f56e7 100644
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -2610,8 +2610,62 @@ EXPORT int32_t my_epoll_ctl(x64emu_t* emu, int32_t epfd, int32_t op, int32_t fd,
+         AlignEpollEvent(_event, event, 1);
+     return epoll_ctl(epfd, op, fd, event?_event:NULL);
+ }
++
++/* [epoll VLA stack-overflow fix]
++ *
++ * Upstream my_epoll_wait / my_epoll_pwait / my_epoll_pwait2 all declare
++ *
++ *     struct epoll_event _events[maxevents];
++ *
++ * a VLA whose size is controlled directly by the guest. GCC emits stack
++ * probing code for it:
++ *
++ *     sbfiz  x9, x3, #4, #32      // x9 = (int32_t)maxevents << 4
++ *     and    x8, x9, #~0xffff     // page aligned high part
++ *     cmp    sp, x8
++ *     b.eq   skip
++ *   loop:
++ *     sub    sp, sp, #0x10000
++ *     str    xzr, [sp, #1024]
++ *     cmp    sp, x8
++ *     b.ne   loop
++ *
++ * With a negative maxevents the shift/sign-extension yields
++ * x8 = 0xffffffffffff0000 and this loop runs ~2^48 times, so sp walks off
++ * the stack into unmapped memory -> SIGSEGV.
++ *
++ * Observed with a Wine/Proton wineserver, which probes epoll_pwait2 at
++ * startup with maxevents = 0:
++ *
++ *     epoll_pwait2(-1, events, 0, NULL, NULL)
++ *     box64: SIGSEGV @... (epoll_pwait2) for accessing (nil)
++ *            RDI:0x00000000ffffffff          // epfd = -1
++ *     -> wineserver SIGSEGV handler calls abort() -> SIGABRT
++ *     -> "wineserver crashed, please enable coredumps ... and restart."
++ *     -> "wine client error:0: recvmsg: Connection reset by peer"
++ *
++ * Even a large positive maxevents (e.g. 0x7fffffff) would try to allocate
++ * gigabytes on the stack. Upstream does no validation at all.
++ *
++ * Fix:
++ *   1. maxevents <= 0 returns -1/EINVAL, matching the Linux kernel, which
++ *      rejects maxevents <= 0 with EINVAL for epoll_wait/epoll_pwait.
++ *   2. Clamp maxevents to EPOLL_VLA_MAX so an oversized request cannot
++ *      blow up the stack; the caller just gets at most that many events.
++ *
++ * A probe call now returns -1/EINVAL normally, so wineserver keeps its
++ * epoll_pwait2 path (errno != ENOSYS) and subsequent real calls work.
++ */
++#ifndef EPOLL_VLA_MAX
++#define EPOLL_VLA_MAX 4096
++#endif
++#define EPOLL_CLAMP_MAXEVENTS(n) \
++    do { if((n) <= 0) { errno = EINVAL; return -1; } \
++         if((n) > EPOLL_VLA_MAX) (n) = EPOLL_VLA_MAX; } while(0)
++
+ EXPORT int32_t my_epoll_wait(x64emu_t* emu, int32_t epfd, void* events, int32_t maxevents, int32_t timeout)
+ {
++    EPOLL_CLAMP_MAXEVENTS(maxevents);
+     struct epoll_event _events[maxevents];
+     //AlignEpollEvent(_events, events, maxevents);
+     int32_t ret = epoll_wait(epfd, _events, maxevents, timeout);
+@@ -2621,6 +2675,7 @@ EXPORT int32_t my_epoll_wait(x64emu_t* emu, int32_t epfd, void* events, int32_t
+ }
+ EXPORT int32_t my_epoll_pwait(x64emu_t* emu, int32_t epfd, void* events, int32_t maxevents, int32_t timeout, const sigset_t *sigmask)
+ {
++    EPOLL_CLAMP_MAXEVENTS(maxevents);
+     struct epoll_event _events[maxevents];
+     //AlignEpollEvent(_events, events, maxevents);
+     int32_t ret = epoll_pwait(epfd, _events, maxevents, timeout, sigmask);
+@@ -2630,6 +2685,7 @@ EXPORT int32_t my_epoll_pwait(x64emu_t* emu, int32_t epfd, void* events, int32_t
+ }
+ EXPORT int32_t my_epoll_pwait2(x64emu_t* emu, int epfd, void* events, int maxevents, struct timespec *timeout, sigset_t * sigmask)
+ {
++    EPOLL_CLAMP_MAXEVENTS(maxevents);
+     struct epoll_event _events[maxevents];
+     //AlignEpollEvent(_events, events, maxevents);
+     int ret = 0;
