@@ -281,6 +281,19 @@ jobs:
           apply_patch "$GITHUB_WORKSPACE/opt.patch"
           apply_patch "$GITHUB_WORKSPACE/termux.patch"
 
+          # ===== epoll-vla.patch：修复 epoll VLA 负值栈溢出 =====
+          # my_epoll_wait/pwait/pwait2 用 guest 控制的 VLA _events[maxevents]，
+          # maxevents 为负时 GCC 的栈探测循环会跑 2^48 次 → SIGSEGV。
+          # 触发者：Wine/Proton 的 wineserver 启动探测 epoll_pwait2(-1,...,0,...)。
+          # 修复：maxevents <= 0 → -1/EINVAL；上限截到 4096。
+          EP_PATCH="$GITHUB_WORKSPACE/epoll-vla.patch"
+          if [ -f "$EP_PATCH" ] && patch -p1 --dry-run < "$EP_PATCH" >/dev/null 2>&1; then
+            apply_patch "$EP_PATCH"
+            echo "✅ epoll-vla 已生效"
+          else
+            echo "⚠️ epoll-vla.patch 不可用/不兼容，跳过"
+          fi
+
           # 应用 dfnone 修复（codegen + pass0/pass1 共 3 处）
           python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
           
