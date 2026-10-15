@@ -372,6 +372,36 @@ jobs:
             echo "✅ android-wx 已生效：宿主 mprotect 已剥离 PROT_EXEC（文件内 ${WX_N} 处引用 = 2 处宏定义 + 5 个调用点）"
           fi
 
+          # ===== epoll-vla.patch：修复 epoll VLA 负值栈溢出（Wine/Proton 崩溃根因）=====
+          # 背景：上游 my_epoll_wait / my_epoll_pwait / my_epoll_pwait2 都用
+          #       struct epoll_event _events[maxevents];   // guest 直接控制的 VLA
+          #       GCC 会生成栈探测代码：
+          #         sbfiz x9, x3, #4, #32     // x9 = (int32)maxevents << 4
+          #         and   x8, x9, #~0xffff
+          #         cmp   sp, x8 ; b.eq skip
+          #       loop: sub sp, sp, #0x10000 ; str xzr,[sp,#1024] ; cmp sp,x8 ; b.ne loop
+          #       maxevents 为负时 x8 = 0xffffffffffff0000，该循环要跑 2^48 次，
+          #       sp 立刻越过栈底撞到未映射内存 → SIGSEGV。
+          #
+          # 触发实例（Wine/Proton 的 wineserver 启动时探测 epoll_pwait2）：
+          #     epoll_pwait2(-1, events, 0, NULL, NULL)
+          #     box64: SIGSEGV @(epoll_pwait2) for accessing (nil), RDI=0xffffffff
+          #     -> wineserver 的 SIGSEGV handler 调 abort() -> SIGABRT
+          #     -> "wineserver crashed, please enable coredumps ... and restart."
+          #     -> "wine client error:0: recvmsg: Connection reset by peer"
+          #
+          # 修复：maxevents <= 0 返回 -1/EINVAL（同内核语义）；
+          #       并把 maxevents 上限截到 4096，避免超大正数把栈撑爆。
+          EP_PATCH="$GITHUB_WORKSPACE/epoll-vla.patch"
+          if [ ! -f "$EP_PATCH" ]; then
+            echo "⚠️ 找不到 $EP_PATCH，跳过 epoll VLA 修复（Wine 系可能仍会崩）"
+          elif patch -p1 --dry-run < "$EP_PATCH" >/dev/null 2>&1; then
+            apply_patch "$EP_PATCH"
+            echo "✅ epoll-vla 已生效（my_epoll_wait/pwait/pwait2 已加 maxevents 边界检查）"
+          else
+            echo "⚠️ epoll-vla.patch 与当前上游不兼容（epoll wrapper 上下文已变），跳过"
+          fi
+
           python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
 
           mkdir -p build && cd build
