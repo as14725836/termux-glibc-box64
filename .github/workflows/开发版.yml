@@ -417,6 +417,7 @@ jobs:
           WX_RAW=$(grep -rn 'mprotect(' src --include=*.c \
             | grep -v 'box64_host_mprotect' \
             | grep -v 'my_mprotect' \
+            | grep -v 'my32_mprotect' \
             | grep -v '//' \
             | grep -v '^src/os/os_wine.c' \
             | grep -v 'printf_log' \
