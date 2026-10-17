@@ -2,6 +2,12 @@ name: 开发版 Box64 (aarch64)
 
 on:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: '强制构建（忽略「上游无 ARM 相关新提交」的跳过判定，用于验证补丁改动本身）'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '*/30 * * * *'
 
@@ -182,6 +188,14 @@ jobs:
       - name: 检查是否需要构建
         id: check_build
         run: |
+          # 手动触发时允许强制构建：本次改动可能只动了本仓库的补丁/工作流，
+          # 上游 box64 并没有新提交，但仍然必须验证补丁能打上、能编过。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_build }}" = "true" ]; then
+            echo "🟢 强制构建（force_build=true），跳过往期提交比对"
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+            echo "arm_reason=forced" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           LAST_BUILD="${{ steps.get_last.outputs.last_build }}"
           CURRENT_COMMIT="${{ env.LATEST_COMMIT }}"
 
