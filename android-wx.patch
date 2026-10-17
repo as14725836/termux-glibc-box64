@@ -1,90 +1,315 @@
-diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
-index 10c0f34..de446a6 100644
---- a/src/wrapped/wrappedlibc.c
-+++ b/src/wrapped/wrappedlibc.c
-@@ -4053,6 +4053,40 @@ EXPORT int my_munmap(x64emu_t* emu, void* addr, size_t length)
-     return ret;
- }
- 
-+#if defined(ANDROID) || defined(TERMUX) || defined(WINLATOR_GLIBC)
-+/* [Android W^X workaround]
-+ *
-+ * Android 10+ (targetSdkVersion >= 29) runs apps in the untrusted_app SELinux
-+ * domain, which refuses mprotect(PROT_EXEC) on app-private-storage-backed
-+ * memory. Guest mprotect() calls then fail, breaking loaders and protectors
-+ * that mark code pages executable.
-+ *
-+ * box64 never executes guest pages natively: every guest instruction is JIT'ed
-+ * into box64's own code cache, which is allocated with MAP_ANONYMOUS and is
-+ * therefore still allowed to be executable. Stripping PROT_EXEC from the *host*
-+ * mapping of guest memory is thus safe.
-+ *
-+ * Only the flags handed to the host mprotect() are stripped. box64's own
-+ * bookkeeping (updateProtection / setGuestProtection) still receives the
-+ * original flags, so guest-visible page attributes and the SMC / write
-+ * protection state machine are unaffected.
-+ *
-+ * Set BOX64_ANDROID_WX=0 to get the upstream behaviour back.
-+ */
-+static int box64_android_wx_strip(void)
+diff --git a/src/core.c b/src/core.c
+index 468775b..1520d81 100644
+--- a/src/core.c
++++ b/src/core.c
+@@ -1407,9 +1407,9 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
+             printf_log(LOG_INFO, "Patched heroic!\n");
+             uintptr_t page = ((uintptr_t)&address[0x422f6e1])&~(box64_pagesize-1);
+             int prot = getProtection(page);
+-            mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);
++            box64_host_mprotect((void*)page, box64_pagesize, PROT_READ|PROT_WRITE|PROT_EXEC);
+             address[0x422f6e1]=0x90; address[0x422f6e2]=0x90;
+-            mprotect((void*)page, box64_pagesize, prot);
++            box64_host_mprotect((void*)page, box64_pagesize, prot);
+         }
+     }
+     if(ElfCheckIfUseTCMallocMinimal(elf_header)) {
+diff --git a/src/custommem.c b/src/custommem.c
+index ec388e5..600508d 100644
+--- a/src/custommem.c
++++ b/src/custommem.c
+@@ -25,6 +25,56 @@
+ #include "rbtree.h"
+ #include "mysignal.h"
+ #include "mypthread.h"
++
++// ---------------------------------------------------------------------------
++// [Android W^X] host-side mprotect() wrapper.
++//
++// Android 10+ (targetSdkVersion >= 29) runs apps in the untrusted_app SELinux
++// domain and refuses mprotect(PROT_EXEC) on app-private-storage backed memory.
++// box64 never executes guest pages natively (everything goes through the JIT
++// code cache, which lives in MAP_ANONYMOUS memory), so PROT_EXEC can be
++// stripped from the *host* protection without changing guest semantics.
++//
++// my_mprotect() in wrappedlibc.c strips it for the guest-visible path, but the
++// dynarec/SMC machinery in this file calls host mprotect() directly (protectDB,
++// liftWriteProtection, refreshProtection, updateProtection). Those calls used to
++// keep PROT_EXEC and therefore failed under Android, which in turn made
++// protectors such as WinLicense/SecureEngine impossible to run: they map code
++// RW, decrypt, then mprotect(R-X). Route every host call through
++// box64_host_mprotect() so the W^X workaround covers the whole allocator.
++//
++// Disable with BOX64_ANDROID_WX=0.
++static int box64_android_wx_enabled(void)
 +{
 +    static int cached = -1;
-+    if(cached < 0) {
++    if (cached < 0) {
 +        const char* e = getenv("BOX64_ANDROID_WX");
 +        cached = (!e || (e[0] != '0' && e[0] != 'n' && e[0] != 'N' && e[0] != 'f' && e[0] != 'F')) ? 1 : 0;
 +    }
 +    return cached;
 +}
-+#define BOX64_HOST_MPROT(p) (box64_android_wx_strip() ? ((p) & ~PROT_EXEC) : (p))
++
++#if defined(ANDROID) || defined(TERMUX) || defined(WINLATOR_GLIBC)
++#define BOX64_HOST_WX_STRIP 1
 +#else
-+#define BOX64_HOST_MPROT(p) (p)
++#define BOX64_HOST_WX_STRIP 0
 +#endif
 +
- EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
++int box64_host_mprotect(void* addr, size_t len, int prot)
++{
++#if BOX64_HOST_WX_STRIP
++    if (prot & PROT_EXEC) {
++        if (box64_android_wx_enabled())
++            prot &= ~PROT_EXEC;
++        if (!(prot & (PROT_READ | PROT_WRITE)))
++            prot |= PROT_READ;   // never leave a mapping completely inaccessible
++    }
++#else
++    (void)box64_android_wx_enabled;
++#endif
++    return mprotect(addr, len, prot);
++}
++
+ #ifdef DYNAREC
+ #include "dynablock.h"
+ #include "dynarec/dynablock_private.h"
+@@ -2246,24 +2296,24 @@ static int hostPageHasExternalWrite_locked(uintptr_t host_page, uintptr_t prot_s
+ static int imposeWriteProtection_locked(uintptr_t cur, uintptr_t bend, uint32_t prot)
  {
-     #ifdef DYNAREC
-@@ -4065,7 +4099,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+     if (box64_pagesize == X86_PAGE_SIZE)
+-        return !mprotect((void*)cur, bend - cur, prot & ~PROT_WRITE);
++        return !box64_host_mprotect((void*)cur, bend - cur, prot & ~PROT_WRITE);
+     uintptr_t hostpage_start = ALIGN_DOWN(cur);
+     uintptr_t hostpage_end = ALIGN(bend);
+     for (uintptr_t hostpage = hostpage_start; hostpage < hostpage_end; hostpage += box64_pagesize)
+         if (hostPageHasExternalWrite_locked(hostpage, cur, bend))
+             return 0;
+-    return !mprotect((void*)hostpage_start, hostpage_end - hostpage_start, prot & ~PROT_WRITE);
++    return !box64_host_mprotect((void*)hostpage_start, hostpage_end - hostpage_start, prot & ~PROT_WRITE);
+ }
+ 
+ static void liftWriteProtection_locked(uintptr_t cur, uintptr_t bend, uint32_t prot)
+ {
+     if (box64_pagesize == X86_PAGE_SIZE) {
+-        mprotect((void*)cur, bend - cur, prot);
++        box64_host_mprotect((void*)cur, bend - cur, prot);
+         return;
+     }
+     uintptr_t hostpage_start = ALIGN_DOWN(cur);
+     uintptr_t hostpage_end = ALIGN(bend);
+-    if (mprotect((void*)hostpage_start, hostpage_end - hostpage_start, prot))
++    if (box64_host_mprotect((void*)hostpage_start, hostpage_end - hostpage_start, prot))
+         return;
+     if (hostpage_start == cur && hostpage_end == bend)
+         return;
+@@ -2321,11 +2371,11 @@ static int applyDBHostPageProtection_locked(uintptr_t cur, uintptr_t bend, uint3
+         prot = base_prot | PROT_DYNAREC_R | PROT_NEVERCLEAN | PROT_NEVERCLEAN_MIXED;
+     } else if (base_prot & PROT_WRITE) {
+         if (!(dyn & PROT_DYNAREC) || (dyn & PROT_NEVERCLEAN_MIXED))
+-            mprotect((void*)hostpage_start, hostpage_end - hostpage_start, base_prot & ~PROT_WRITE);
++            box64_host_mprotect((void*)hostpage_start, hostpage_end - hostpage_start, base_prot & ~PROT_WRITE);
+         prot = base_prot | PROT_DYNAREC;
+     } else {
+         if (!(dyn & PROT_DYNAREC_R) || (dyn & PROT_NEVERCLEAN_MIXED))
+-            mprotect((void*)hostpage_start, hostpage_end - hostpage_start, base_prot);
++            box64_host_mprotect((void*)hostpage_start, hostpage_end - hostpage_start, base_prot);
+         prot = base_prot | PROT_DYNAREC_R;
+     }
+ 
+@@ -2689,7 +2739,7 @@ void updateProtection(uintptr_t addr, size_t size, uint32_t prot)
+                     flagUnprotectedNeighbours_locked(cur);
+                 }
+                 #else
+-                int ret = mprotect((void*)cur, bend-cur, prot&~PROT_WRITE);
++                int ret = box64_host_mprotect((void*)cur, bend-cur, prot&~PROT_WRITE);
+                 dynarec_log(LOG_DEBUG, " mprotect %p:%p 0x%hhx => %d\n", (void*)cur, (void*)(bend-1), prot&~PROT_WRITE, ret);
+                 #endif
+             } else if(dyn && !(prot&PROT_WRITE)) {
+@@ -2777,7 +2827,7 @@ void refreshProtection(uintptr_t addr)
+     uint32_t prot;
+     uintptr_t bend;
+     if (rb_get_end(memprot, addr, &prot, &bend)) {
+-        int ret = mprotect((void*)ALIGN_DOWN(addr), box64_pagesize, prot&~PROT_CUSTOM);
++        int ret = box64_host_mprotect((void*)ALIGN_DOWN(addr), box64_pagesize, prot&~PROT_CUSTOM);
+         #ifdef DYNAREC
+         if (box64_pagesize > X86_PAGE_SIZE && (prot & PROT_WRITE))
+             flagUnprotectedNeighbours_locked(addr);
+diff --git a/src/elfs/elfloader.c b/src/elfs/elfloader.c
+index 0217e9c..fe7cdfb 100644
+--- a/src/elfs/elfloader.c
++++ b/src/elfs/elfloader.c
+@@ -481,7 +481,7 @@ int AllocLoadElfMemory(box64context_t* context, elfheader_t* head, int mainbin)
+             for(uintptr_t page = start; page < end; page += box64_pagesize) {
+                 uint32_t prot = getProtection(page);
+                 if(prot && !(prot & PROT_WRITE))
+-                    mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM);
++                    box64_host_mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM);
+             }
+         }
+     }
+@@ -1051,7 +1051,7 @@ static void applyElfRelro64(elfheader_t* head)
+             if (!prot) continue;
+             if (old_prot & (PROT_DYNAREC | PROT_DYNAREC_R))
+                 prot |= PROT_DYNAREC_R;
+-            if (mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM)) {
++            if (box64_host_mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM)) {
+                 printf_log(LOG_INFO, "Warning: cannot apply GNU RELRO to %s at %p: %s\n", head->name, (void*)page, strerror(errno));
+                 continue;
+             }
+@@ -1745,11 +1745,11 @@ void PatchLoadedDynamicSection(elfheader_t* h)
+     for(uintptr_t page = page_addr; page < page_end; page += box64_pagesize) {
+         uint32_t old_prot = getProtection(page);
+         if(old_prot && !(old_prot & PROT_WRITE)) {
+-            if(mprotect((void*)page, box64_pagesize, (old_prot | PROT_WRITE) & ~PROT_CUSTOM)) {
++            if(box64_host_mprotect((void*)page, box64_pagesize, (old_prot | PROT_WRITE) & ~PROT_CUSTOM)) {
+                 for(uintptr_t restore = page_addr; restore < page; restore += box64_pagesize) {
+                     uint32_t restore_prot = getProtection(restore);
+                     if(restore_prot && !(restore_prot & PROT_WRITE))
+-                        mprotect((void*)restore, box64_pagesize, restore_prot & ~PROT_CUSTOM);
++                        box64_host_mprotect((void*)restore, box64_pagesize, restore_prot & ~PROT_CUSTOM);
+                 }
+                 return;
+             }
+@@ -1777,7 +1777,7 @@ void PatchLoadedDynamicSection(elfheader_t* h)
+         for(uintptr_t page = page_addr; page < page_end; page += box64_pagesize) {
+             uint32_t old_prot = getProtection(page);
+             if(old_prot && !(old_prot & PROT_WRITE))
+-                mprotect((void*)page, box64_pagesize, old_prot & ~PROT_CUSTOM);
++                box64_host_mprotect((void*)page, box64_pagesize, old_prot & ~PROT_CUSTOM);
+         }
+     }
+ 
+diff --git a/src/elfs/elfloader32.c b/src/elfs/elfloader32.c
+index 7663938..7cd8402 100644
+--- a/src/elfs/elfloader32.c
++++ b/src/elfs/elfloader32.c
+@@ -374,7 +374,7 @@ int AllocLoadElfMemory32(box64context_t* context, elfheader_t* head, int mainbin
+             for(uintptr_t page = start; page < end; page += box64_pagesize) {
+                 uint32_t prot = getProtection(page);
+                 if(prot && !(prot & PROT_WRITE))
+-                    mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM);
++                    box64_host_mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM);
+             }
+         }
+     }
+@@ -823,7 +823,7 @@ static void applyElfRelro32(elfheader_t* head)
+             if (!prot) continue;
+             if (old_prot & (PROT_DYNAREC | PROT_DYNAREC_R))
+                 prot |= PROT_DYNAREC_R;
+-            if (mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM)) {
++            if (box64_host_mprotect((void*)page, box64_pagesize, prot & ~PROT_CUSTOM)) {
+                 printf_log(LOG_INFO, "Warning: cannot apply GNU RELRO to %s at %p: %s\n", head->name, (void*)page, strerror(errno));
+                 continue;
+             }
+diff --git a/src/include/custommem.h b/src/include/custommem.h
+index 1643eda..59b353c 100644
+--- a/src/include/custommem.h
++++ b/src/include/custommem.h
+@@ -121,6 +121,12 @@ uintptr_t getJumpAddress64(uintptr_t addr);
+ #define PROT_NEVERPROT  (PROT_NOPROT | PROT_NEVERCLEAN)
+ #define PROT_WAIT       0xFF
+ 
++// [Android W^X] Host-side mprotect() wrapper. On Android/Termux/Winlator-glibc it
++// strips PROT_EXEC before hitting the kernel so that page tables stay W^X clean
++// while the guest still believes it owns an executable page (dynarec keeps working
++// because it never relies on the host exec bit for its own code cache).
++int box64_host_mprotect(void* addr, size_t len, int prot);
++
+ void updateProtection(uintptr_t addr, size_t size, uint32_t prot);
+ void setProtection(uintptr_t addr, size_t size, uint32_t prot);
+ void setProtection_mmap(uintptr_t addr, size_t size, uint32_t prot);
+diff --git a/src/wrapped/wrappedlibc.c b/src/wrapped/wrappedlibc.c
+index 10c0f34..35988ce 100644
+--- a/src/wrapped/wrappedlibc.c
++++ b/src/wrapped/wrappedlibc.c
+@@ -101,6 +101,7 @@ extern const char *const sys_siglist[] __asm__("__sys_siglist");
+ #include "random.h"
+ #include "cpumask.h"
+ #include "x64tls.h"
++#include "custommem.h"
+ #ifndef LOG_INFO
+ #define LOG_INFO 1
+ #endif
+@@ -3752,7 +3753,7 @@ EXPORT void* my_mmap64(x64emu_t* emu, void *addr, size_t length, int prot, int f
+             first_edge_prot = prot | old_prot;
+             int host_prot = first_edge_prot & ~PROT_CUSTOM;
+             if(host_prot & PROT_WRITE) host_prot |= PROT_READ;
+-            if(mprotect((void*)host_start, box64_pagesize, host_prot | PROT_READ | PROT_WRITE)) {
++            if(box64_host_mprotect((void*)host_start, box64_pagesize, host_prot | PROT_READ | PROT_WRITE)) {
+                 failed = 1;
+                 saved_errno = errno;
+             } else
+@@ -3765,7 +3766,7 @@ EXPORT void* my_mmap64(x64emu_t* emu, void *addr, size_t length, int prot, int f
+             last_edge_prot = prot | old_prot;
+             int host_prot = last_edge_prot & ~PROT_CUSTOM;
+             if(host_prot & PROT_WRITE) host_prot |= PROT_READ;
+-            if(mprotect((void*)last_edge_page, box64_pagesize, host_prot | PROT_READ | PROT_WRITE)) {
++            if(box64_host_mprotect((void*)last_edge_page, box64_pagesize, host_prot | PROT_READ | PROT_WRITE)) {
+                 failed = 1;
+                 saved_errno = errno;
+             } else
+@@ -3794,7 +3795,7 @@ EXPORT void* my_mmap64(x64emu_t* emu, void *addr, size_t length, int prot, int f
+         if(emulated_last_edge) {
+             int host_prot = last_edge_prot & ~PROT_CUSTOM;
+             if(host_prot & PROT_WRITE) host_prot |= PROT_READ;
+-            if(mprotect((void*)last_edge_page, box64_pagesize, host_prot) && !failed) {
++            if(box64_host_mprotect((void*)last_edge_page, box64_pagesize, host_prot) && !failed) {
+                 failed = 1;
+                 saved_errno = errno;
+             }
+@@ -3802,7 +3803,7 @@ EXPORT void* my_mmap64(x64emu_t* emu, void *addr, size_t length, int prot, int f
+         if(emulated_first_edge) {
+             int host_prot = first_edge_prot & ~PROT_CUSTOM;
+             if(host_prot & PROT_WRITE) host_prot |= PROT_READ;
+-            if(mprotect((void*)first_edge_page, box64_pagesize, host_prot) && !failed) {
++            if(box64_host_mprotect((void*)first_edge_page, box64_pagesize, host_prot) && !failed) {
+                 failed = 1;
+                 saved_errno = errno;
+             }
+@@ -4065,7 +4066,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
          prot|=PROT_READ;    // PROT_READ is implicit with PROT_WRITE on x86_64
      uintptr_t start = (uintptr_t)addr;
      if(box64_pagesize == X86_PAGE_SIZE) {
 -        int ret = mprotect(addr, len, prot);
-+        int ret = mprotect(addr, len, BOX64_HOST_MPROT(prot));
++        int ret = box64_host_mprotect(addr, len, prot);
          if(!ret && len) {
              updateProtection(start, len, prot);
              setGuestProtection(start, len, prot, 0);
-@@ -4083,7 +4117,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+@@ -4083,7 +4084,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
  
      if(host_end - host_start == box64_pagesize && (start != host_start || end != host_end)) {
          int host_prot = prot | (getProtection(host_start) & ~PROT_CUSTOM);
 -        int ret = mprotect((void*)host_start, box64_pagesize, host_prot);
-+        int ret = mprotect((void*)host_start, box64_pagesize, BOX64_HOST_MPROT(host_prot));
++        int ret = box64_host_mprotect((void*)host_start, box64_pagesize, host_prot);
          if(!ret) {
              updateProtection(host_start, box64_pagesize, host_prot);
              setGuestProtection(start, end - start, prot, 0);
-@@ -4093,7 +4127,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+@@ -4093,7 +4094,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
  
      if(start != host_start) {
          int host_prot = prot | (getProtection(host_start) & ~PROT_CUSTOM);
 -        int ret = mprotect((void*)host_start, box64_pagesize, host_prot);
-+        int ret = mprotect((void*)host_start, box64_pagesize, BOX64_HOST_MPROT(host_prot));
++        int ret = box64_host_mprotect((void*)host_start, box64_pagesize, host_prot);
          if(ret) return -1;
          updateProtection(host_start, box64_pagesize, host_prot);
          host_start += box64_pagesize;
-@@ -4101,7 +4135,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+@@ -4101,7 +4102,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
      if(end != host_end) {
          host_end -= box64_pagesize;
          int host_prot = prot | (getProtection(host_end) & ~PROT_CUSTOM);
 -        int ret = mprotect((void*)host_end, box64_pagesize, host_prot);
-+        int ret = mprotect((void*)host_end, box64_pagesize, BOX64_HOST_MPROT(host_prot));
++        int ret = box64_host_mprotect((void*)host_end, box64_pagesize, host_prot);
          if(ret) return -1;
          updateProtection(host_end, box64_pagesize, host_prot);
      }
-@@ -4109,7 +4143,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
+@@ -4109,7 +4110,7 @@ EXPORT int my_mprotect(x64emu_t* emu, void *addr, unsigned long len, int prot)
          setGuestProtection(start, end - start, prot, 0);
          return 0;
      }
 -    int ret = mprotect((void*)host_start, host_end - host_start, prot);
-+    int ret = mprotect((void*)host_start, host_end - host_start, BOX64_HOST_MPROT(prot));
++    int ret = box64_host_mprotect((void*)host_start, host_end - host_start, prot);
      if(!ret) {
          updateProtection(host_start, host_end - host_start, prot);
          setGuestProtection(start, end - start, prot, 0);
