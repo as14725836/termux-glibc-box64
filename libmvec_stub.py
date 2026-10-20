@@ -129,14 +129,40 @@ def main(argv):
                       % (mangled, helper, scalar))
     src_new = src[:pos] + '\n'.join(cblock) + '\n\n' + src[pos:]
 
-    hblock = ['', '// ===== libmvec 向量数学桩（由 libmvec_stub.py 注入）=====']
-    added_h = 0
+    # 注意：box64 的 rebuild_wrappers.py 把 `//GO(sym, vFv)` 注释行也当成
+    # 一个“已声明符号”（用来预登记 ABI 类型）。若我们另起一行追加 GOM，
+    # 同名就会出现两次，CI 会报：
+    #     Function or data _ZGVbN2v_log2 is duplicated! (wrappedlibmvec_private.h)
+    # 所以必须「把注释行原地改成 GOM」，而不是追加。
+    replaced = 0
+    appended = []
     for mangled, scalar, helper in todo:
-        if re.search(r'^GOM\(%s,' % re.escape(mangled), hdr, re.M):
-            continue
-        hblock.append('GOM(%s, vFEv)' % mangled)
-        added_h += 1
-    hdr_new = hdr.rstrip('\n') + '\n' + '\n'.join(hblock) + '\n'
+        pat = re.compile(r'^//GO\(%s,[^\n]*\)[ \t]*$' % re.escape(mangled), re.M)
+        if pat.search(hdr):
+            hdr = pat.sub('GOM(%s, vFEv)' % mangled, hdr, count=1)
+            replaced += 1
+        elif re.search(r'^GOM\(%s,' % re.escape(mangled), hdr, re.M):
+            continue                      # 已经是导出项，跳过
+        else:
+            appended.append('GOM(%s, vFEv)' % mangled)
+    if appended:
+        hdr = hdr.rstrip('\n') + '\n' + \
+              '\n'.join(['', '// ===== libmvec 向量数学桩（由 libmvec_stub.py 注入）====='] + appended) + '\n'
+    added_h = replaced + len(appended)
+
+    # 自检：同一符号名不允许在导出表里出现两次
+    seen = {}
+    for line in hdr.splitlines():
+        m = re.match(r'^[ \t]*(?://)?[ \t]*(GO|GOM|GO2|DATA)\([ \t]*([A-Za-z0-9_$]+)', line)
+        if m:
+            seen.setdefault(m.group(2), []).append(line.strip())
+    dups = {k: v for k, v in seen.items() if len(v) > 1}
+    if dups:
+        print('❌ 导出表出现重复符号（rebuild_wrappers.py 会报 duplicated）:')
+        for k, v in list(dups.items())[:10]:
+            print('   %s -> %s' % (k, ' | '.join(v)))
+        return 7
+    hdr_new = hdr
 
     open(cpath, 'w', encoding='utf-8').write(src_new)
     open(hpath, 'w', encoding='utf-8').write(hdr_new)
