@@ -461,6 +461,46 @@ jobs:
 
           python3 "$GITHUB_WORKSPACE/fix_dfnone.py" || { echo "❌ dfnone 修复失败，终止构建"; exit 1; }
 
+          # ===== libmvec 向量数学桩：补 _ZGVbN2v_log2 等（libx265 装载必需）=====
+          # 症状：
+          #   [BOX64] Error: Global Symbol _ZGVbN2v_log2 not found,
+          #           cannot apply R_X86_64_GLOB_DAT @0x3f16507320 ((nil))
+          #           in .../wine/x86_64-unix/libx265.so.217
+          # 原因：
+          #   wine 的 libx265.so.217 由 glibc 的 libm.so 链接脚本带入
+          #   AS_NEEDED(libmvec.so.1)，因而引用了 SSE2 向量数学符号
+          #   _ZGVbN2v_log2（ABI: __m128d -> __m128d）。box64 的
+          #   wrappedlibmvec.c 只实现了 sin/cos/exp/log/pow，log2/log10/
+          #   exp2/... 整族仍是上游注释掉的占位：
+          #       //GO(_ZGVbN2v_log2, vFv)
+          #   → 符号解析失败，box64 把该 GOT 槽写成 0；x265 一旦走到
+          #     向量化 log2 分支（psy-rd / 码率控制）就是 call 0 → SIGSEGV。
+          # 修复：
+          #   libmvec_stub.py 向 wrappedlibmvec_private.h 追加 GOM(...) 导出项、
+          #   向 wrappedlibmvec.c 追加 my_ 实现（逐 lane 调宿主标量 libm）。
+          #   纯追加式注入，不依赖上下文行号；已存在同名实现时自动跳过（幂等）。
+          MVEC_STRICT="${MVEC_STUB_STRICT:-1}"
+          if python3 "$GITHUB_WORKSPACE/libmvec_stub.py"; then
+            echo "✅ libmvec 桩注入完成"
+          else
+            echo "❌ libmvec 桩注入失败（见上方输出）"
+            [ "$MVEC_STRICT" = "0" ] || exit 1
+          fi
+
+          # 硬校验：符号必须真的进了源码（GOM 导出项 + my_ 实现）
+          MVEC_C=src/wrapped/wrappedlibmvec.c
+          MVEC_H=src/wrapped/wrappedlibmvec_private.h
+          MVEC_OK=1
+          grep -q 'EXPORT void my__ZGVbN2v_log2' "$MVEC_C" 2>/dev/null || MVEC_OK=0
+          grep -q 'GOM(_ZGVbN2v_log2,' "$MVEC_H" 2>/dev/null || MVEC_OK=0
+          if [ "$MVEC_OK" = "1" ]; then
+            MVEC_N=$(grep -c 'EXPORT void my__ZGV' "$MVEC_C" || true)
+            echo "✅ _ZGVbN2v_log2 已导出（共 ${MVEC_N} 个 _ZGV* 桩实现）"
+          else
+            echo "❌ _ZGVbN2v_log2 未出现在源码里"
+            [ "$MVEC_STRICT" = "0" ] || exit 1
+          fi
+
           mkdir -p build && cd build
 
           cmake .. \
@@ -471,6 +511,15 @@ jobs:
             -DSD8G2=ON
 
           make -j$(nproc)
+
+          # 校验桩确实编进了二进制（导出表里的符号名是静态字符串）
+          if strings ./box64 | grep -q '^_ZGVbN2v_log2$'; then
+            echo "✅ 二进制内含 _ZGVbN2v_log2 导出项"
+          else
+            echo "❌ 二进制内没有 _ZGVbN2v_log2 —— 桩没编进去"
+            exit 1
+          fi
+
           echo "✅ 构建完成"
 
           patchelf --set-interpreter /data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1 ./box64
